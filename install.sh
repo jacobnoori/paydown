@@ -27,21 +27,6 @@ apt-get install -y -qq python3 git ca-certificates curl >/dev/null
 
 msg "Creating service user"
 id -u "$SVC_USER" >/dev/null 2>&1 || useradd --system --home-dir "$DATA_DIR" --no-create-home --shell /usr/sbin/nologin "$SVC_USER"
-
-# Migrate an install made under the app's previous name (debt-tracker), keeping data and password.
-if [[ -d /var/lib/debt-tracker && ! -e $DATA_DIR ]]; then
-  msg "Migrating previous debt-tracker install"
-  systemctl disable --now debt-tracker 2>/dev/null || true
-  rm -f /etc/systemd/system/debt-tracker.service /usr/local/bin/debt-tracker
-  mv /var/lib/debt-tracker "$DATA_DIR"
-  chown -R "$SVC_USER:$SVC_USER" "$DATA_DIR"
-  if [[ -f /etc/debt-tracker.env && ! -f $ENV_FILE ]]; then
-    sed -e 's/^DT_/PAYDOWN_/' -e "s#/var/lib/debt-tracker#$DATA_DIR#" /etc/debt-tracker.env > "$ENV_FILE"
-  fi
-  rm -rf /opt/debt-tracker /etc/debt-tracker.env
-  userdel debt-tracker 2>/dev/null || true
-  systemctl daemon-reload
-fi
 install -d -o "$SVC_USER" -g "$SVC_USER" -m 750 "$DATA_DIR"
 
 msg "Fetching code into $APP_DIR"
