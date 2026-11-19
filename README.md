@@ -5,6 +5,10 @@ balances, APR and interest rates, purchases, payments split into interest and pr
 a running balance after every transaction, a calendar of payment due dates, and storage for
 loan agreements and monthly statements (PDF).
 
+Checking and savings accounts can be tracked alongside your debts: log deposits, purchases/withdrawals,
+fees and interest earned, with a running balance after each entry. Savings accounts have an APY, used to
+estimate monthly interest. Cash accounts are kept out of debt totals, APR averages and the due-date calendar.
+
 Single-user, password-protected, no external dependencies. The backend is one Python file (standard library only)
 and data is a single JSON file on the server.
 

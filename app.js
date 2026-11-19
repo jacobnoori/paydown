@@ -5,16 +5,29 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
+// kind: 'debt' accounts are money owed (balance = amount owed); 'cash' accounts hold money (balance = amount held).
 const TYPES = {
-  credit_card:   { label: 'Credit Card',   color: '#6366f1' },
-  personal_loan: { label: 'Personal Loan', color: '#0ea5e9' },
-  auto_loan:     { label: 'Auto Loan',     color: '#f59e0b' },
-  mortgage:      { label: 'Mortgage',      color: '#10b981' },
+  credit_card:   { label: 'Credit Card',   plural: 'Credit Cards',      color: '#6366f1', kind: 'debt' },
+  personal_loan: { label: 'Personal Loan', plural: 'Personal Loans',    color: '#0ea5e9', kind: 'debt' },
+  auto_loan:     { label: 'Auto Loan',     plural: 'Auto Loans',        color: '#f59e0b', kind: 'debt' },
+  mortgage:      { label: 'Mortgage',      plural: 'Mortgages',         color: '#10b981', kind: 'debt' },
+  checking:      { label: 'Checking',      plural: 'Checking Accounts', color: '#64748b', kind: 'cash' },
+  savings:       { label: 'Savings',       plural: 'Savings Accounts',  color: '#d946ef', kind: 'cash' },
 };
-const TX_LABEL = { purchase: 'Purchase', payment: 'Payment', interest: 'Interest charge', fee: 'Fee', refund: 'Refund / credit', adjustment: 'Adjustment' };
+const TX_LABEL = { purchase: 'Purchase', payment: 'Payment', interest: 'Interest charge', fee: 'Fee', refund: 'Refund / credit', adjustment: 'Adjustment', deposit: 'Deposit', withdrawal: 'Withdrawal' };
 const isCard = t => t === 'credit_card';
+const isCash = t => TYPES[t].kind === 'cash';
+const isLoan = t => !isCard(t) && !isCash(t);
 const hasRate = t => t === 'mortgage' || t === 'auto_loan';     // separate note rate in addition to APR
-const txTypesFor = t => isCard(t) ? ['purchase', 'payment', 'interest', 'fee', 'refund', 'adjustment'] : ['payment', 'fee', 'adjustment'];
+const isDebtAcc = a => !isCash(a.type);
+const txTypesFor = t => isCard(t) ? ['purchase', 'payment', 'interest', 'fee', 'refund', 'adjustment']
+  : t === 'checking' ? ['withdrawal', 'deposit', 'fee', 'interest', 'adjustment']
+  : t === 'savings' ? ['deposit', 'withdrawal', 'interest', 'fee', 'adjustment']
+  : ['payment', 'fee', 'adjustment'];
+// Labels that read differently on cash accounts.
+const txLabel = (type, accType) => (isCash(accType) && { interest: 'Interest earned', withdrawal: accType === 'checking' ? 'Purchase / withdrawal' : 'Withdrawal' }[type]) || TX_LABEL[type];
+// Monthly interest earned at an APY (APY already includes compounding).
+const apyMonthly = (bal, apy) => Math.round(Math.max(bal, 0) * (Math.pow(1 + (apy || 0) / 100, 1 / 12) - 1));
 // Rate actually used to accrue interest: note rate for mortgage/auto, APR otherwise.
 const rateFor = a => hasRate(a.type) && a.interestRate != null ? a.interestRate : (a.apr || 0);
 
@@ -163,19 +176,24 @@ const getAcc = id => state.accounts.find(a => a.id === id);
 const cmpTx = (a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.createdAt - b.createdAt;
 const txsFor = (accId, excludeId) => state.transactions.filter(t => t.accountId === accId && t.id !== excludeId).sort(cmpTx);
 
-// Effect on the outstanding balance. Loan payments only reduce balance by their principal portion.
-function effect(t) {
+// Effect on the account's balance. Debt accounts: balance owed (loan payments reduce it only by their
+// principal portion). Cash accounts: balance held (deposits and interest add, withdrawals and fees subtract).
+function effect(t, accType) {
   switch (t.type) {
-    case 'purchase': case 'interest': case 'fee': return t.amount;
-    case 'refund': return -t.amount;
+    case 'purchase': case 'interest': return t.amount;
+    case 'fee': return isCash(accType) ? -t.amount : t.amount;
+    case 'refund': case 'withdrawal': return -t.amount;
+    case 'deposit': return t.amount;
     case 'adjustment': return t.amount;               // signed
     case 'payment': return -(t.amount - (t.interest || 0) - (t.escrow || 0));
   }
   return 0;
 }
+// CSS class for a balance change: green when it's good for you (debt down, cash up), red otherwise.
+const changeCls = (e, accType) => !e ? '' : (isCash(accType) ? e > 0 : e < 0) ? 'neg' : 'pos';
 function ledger(acc, excludeId) {
   let bal = acc.startBalance;
-  return txsFor(acc.id, excludeId).map(t => { const e = effect(t); bal += e; return { ...t, effect: e, balanceAfter: bal }; });
+  return txsFor(acc.id, excludeId).map(t => { const e = effect(t, acc.type); bal += e; return { ...t, effect: e, balanceAfter: bal }; });
 }
 // Balance at end of `date` (after every transaction dated on or before it).
 function balanceOn(acc, date, excludeId) {
@@ -219,6 +237,15 @@ function suggestLoanInterest(acc, date, excludeId) {
   const sum = balanceDaySum(acc, from, date, excludeId);
   return { cents: Math.round(sum * r / 365), why: `${days} day${days === 1 ? '' : 's'} × ${pct(rateFor(acc), 3)} ÷ 365 on avg. ${money(days ? Math.round(sum / days) : 0)}` };
 }
+// Savings interest estimate: daily balance since the last interest credit × the daily rate implied by the APY.
+function estimateSavingsInterest(acc, date, excludeId) {
+  const prev = txsFor(acc.id, excludeId).filter(t => t.type === 'interest' && t.date < date).pop();
+  const from = prev ? prev.date : acc.startDate;
+  const days = Math.max(daysBetween(from, date), 0);
+  const sum = balanceDaySum(acc, from, date, excludeId);
+  const daily = Math.pow(1 + (acc.apy || 0) / 100, 1 / 365) - 1;
+  return { cents: Math.round(sum * daily), why: `Avg. daily balance ${money(days ? Math.round(sum / days) : 0)} at ${pct(acc.apy)} APY × ${days} days` };
+}
 // Credit-card interest estimate: average daily balance since the last interest charge × APR/365 × days.
 function estimateCardInterest(acc, date, excludeId) {
   const prev = txsFor(acc.id, excludeId).filter(t => t.type === 'interest' && t.date < date).pop();
@@ -236,6 +263,7 @@ function amortPayment(principal, ratePct, n) {
 }
 // Month-by-month payoff simulation at a fixed payment.
 function payoff(acc) {
+  if (isCash(acc.type)) return null;
   const bal = currentBalance(acc);
   if (bal <= 0) return { months: 0, interest: 0 };
   const pay = (acc.payment || 0) - (acc.type === 'mortgage' ? (acc.escrow || 0) : 0);
@@ -260,7 +288,7 @@ function payoffDate(p) {
 const dueDateFor = (acc, y, m) => ymd(y, m, Math.min(acc.dueDay, daysInMonth(y, m)));
 // One due-date entry for an account in a given month, with payment status for that cycle.
 function dueEntry(acc, y, m, today = todayISO()) {
-  if (!acc.dueDay) return null;
+  if (!acc.dueDay || isCash(acc.type)) return null;
   const date = dueDateFor(acc, y, m);
   if (date <= acc.startDate) return null;
   const pm = m === 0 ? [y - 1, 11] : [y, m - 1];
@@ -308,7 +336,7 @@ function emptyState() {
   return `<div class="card empty">
     <div class="art"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg></div>
     <h2>No accounts yet</h2>
-    <p>Add a credit card, personal loan, auto loan, or mortgage to start tracking balances, payments, and due dates.</p>
+    <p>Add a credit card, loan, or mortgage to track balances, payments, and due dates — and checking or savings accounts to track your cash.</p>
     <div class="actions" style="justify-content:center">
       <button class="btn primary" data-action="add-account">+ Add account</button>
       <button class="btn" data-action="sample">Load sample data</button>
@@ -320,8 +348,11 @@ function renderDashboard() {
     <div class="actions"><button class="btn primary" data-action="add-account">+ Add account</button></div></div>`;
   if (!state.accounts.length) return head + emptyState();
 
-  const rows = state.accounts.map(a => ({ a, bal: currentBalance(a) }));
+  const all = state.accounts.map(a => ({ a, bal: currentBalance(a) }));
+  const rows = all.filter(r => isDebtAcc(r.a)), cashRows = all.filter(r => !isDebtAcc(r.a));
   const total = rows.reduce((s, r) => s + Math.max(r.bal, 0), 0);
+  const cashTotal = cashRows.reduce((s, r) => s + r.bal, 0);
+  const cashInt = cashRows.reduce((s, r) => s + (r.a.type === 'savings' ? apyMonthly(r.bal, r.a.apy) : 0), 0);
   const cards = rows.filter(r => isCard(r.a.type));
   const limit = cards.reduce((s, r) => s + (r.a.creditLimit || 0), 0);
   const cardBal = cards.reduce((s, r) => s + Math.max(r.bal, 0), 0);
@@ -347,7 +378,8 @@ function renderDashboard() {
 
   return head + `
   <div class="grid stats">
-    <div class="card stat"><div class="label">Total debt</div><div class="value">${money(total)}</div><div class="sub">${state.accounts.length} account${state.accounts.length === 1 ? '' : 's'}</div></div>
+    <div class="card stat"><div class="label">Total debt</div><div class="value">${money(total)}</div><div class="sub">${rows.length} account${rows.length === 1 ? '' : 's'}</div></div>
+    ${cashRows.length ? `<div class="card stat"><div class="label">Cash &amp; savings</div><div class="value">${money(cashTotal)}</div><div class="sub">${cashInt ? `≈ ${money(cashInt)}/mo interest earned` : `${cashRows.length} account${cashRows.length === 1 ? '' : 's'}`}</div></div>` : ''}
     <div class="card stat"><div class="label">Est. interest / month</div><div class="value">${money(monthlyInt)}</div><div class="sub">≈ ${money(monthlyInt * 12)} per year</div></div>
     <div class="card stat"><div class="label">Monthly payments</div><div class="value">${money(monthlyPay)}</div><div class="sub">Minimum / scheduled</div></div>
     <div class="card stat"><div class="label">Weighted APR</div><div class="value">${pct(wApr)}</div><div class="sub">By balance</div></div>
@@ -358,12 +390,14 @@ function renderDashboard() {
     <div class="grid">
       <div class="card card-pad">
         <h2>Debt composition</h2>
-        <div class="stack">${byType.map(x => `<span title="${TYPES[x.t].label}: ${money(x.v)}" style="width:${x.v / total * 100}%;background:${TYPES[x.t].color}"></span>`).join('')}</div>
+        ${total ? '' : '<p class="muted" style="margin:10px 0 0">No debt balances.</p>'}
+        <div class="stack"${total ? '' : ' hidden'}>${byType.map(x => `<span title="${TYPES[x.t].label}: ${money(x.v)}" style="width:${x.v / total * 100}%;background:${TYPES[x.t].color}"></span>`).join('')}</div>
         <div class="legend">${byType.map(x => `<div><span class="dot" style="background:${TYPES[x.t].color}"></span>${TYPES[x.t].label} <b class="num">${money(x.v)}</b> <span class="muted">${(x.v / total * 100).toFixed(1)}%</span></div>`).join('')}</div>
       </div>
       <div class="card">
-        <div class="card-head"><h2>Accounts</h2><a class="btn ghost sm" href="#/accounts">View all</a></div>
-        <div class="table-wrap"><table>
+        <div class="card-head"><h2>Debts</h2><a class="btn ghost sm" href="#/accounts">View all</a></div>
+        ${rows.length ? '' : '<div class="empty-line">No debt accounts.</div>'}
+        <div class="table-wrap"${rows.length ? '' : ' hidden'}><table>
           <thead><tr><th>Account</th><th class="num">Balance</th><th class="num">APR</th><th class="num">Payment</th><th class="num">Payoff</th></tr></thead>
           <tbody>${rows.sort((x, y) => y.bal - x.bal).map(({ a, bal }) => { const p = payoff(a); return `
             <tr class="clickable" data-action="open-account" data-id="${a.id}">
@@ -373,6 +407,18 @@ function renderDashboard() {
               <td class="num">${payoffText(p)}<div class="muted small">${payoffDate(p)}</div></td></tr>`; }).join('')}
           </tbody></table></div>
       </div>
+      ${cashRows.length ? `<div class="card">
+        <div class="card-head"><h2>Cash accounts</h2></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Account</th><th class="num">Balance</th><th class="num">APY</th><th class="num">Interest / mo</th></tr></thead>
+          <tbody>${cashRows.sort((x, y) => y.bal - x.bal).map(({ a, bal }) => `
+            <tr class="clickable" data-action="open-account" data-id="${a.id}">
+              <td><div class="acct"><span class="dot" style="background:${accColor(a)}"></span><div>${esc(a.name)}<div class="muted small" style="font-weight:450">${TYPES[a.type].label}</div></div></div></td>
+              <td class="num"><b>${money(bal)}</b></td>
+              <td class="num">${a.type === 'savings' ? pct(a.apy) : '—'}</td>
+              <td class="num">${a.type === 'savings' ? money(apyMonthly(bal, a.apy)) : '—'}</td></tr>`).join('')}
+          </tbody></table></div>
+      </div>` : ''}
     </div>
     <div class="grid">
       <div class="card">
@@ -384,8 +430,8 @@ function renderDashboard() {
         ${recent.length ? `<ul class="list">${recent.map(t => { const a = getAcc(t.accountId); return a ? `
           <li class="clickable" data-action="open-account" data-id="${a.id}" style="cursor:pointer">
             <span class="dot" style="background:${accColor(a)}"></span>
-            <div class="grow"><b>${esc(t.memo || TX_LABEL[t.type])}</b><span class="muted small">${esc(a.name)} · ${fmtDate(t.date)}</span></div>
-            <div class="right ${t.type === 'payment' || t.type === 'refund' ? 'neg' : ''}">${t.type === 'payment' || t.type === 'refund' ? '−' : t.type === 'adjustment' && t.amount < 0 ? '−' : '+'}${money(Math.abs(t.amount))}</div>
+            <div class="grow"><b>${esc(t.memo || txLabel(t.type, a.type))}</b><span class="muted small">${esc(a.name)} · ${fmtDate(t.date)}</span></div>
+            ${(() => { const e = effect(t, a.type); return `<div class="right ${changeCls(e, a.type)}">${e < 0 ? '−' : e > 0 ? '+' : ''}${money(Math.abs(t.amount))}</div>`; })()}
           </li>` : ''; }).join('')}</ul>` : '<div class="empty-line">No transactions logged yet.</div>'}
       </div>
     </div>
@@ -397,12 +443,12 @@ const dueItem = e => `<li data-action="open-account" data-id="${e.acc.id}" style
   <div class="right"><div>${e.required ? money(e.required) : ''}</div><span class="status ${e.status}">${STATUS_LABEL[e.status]}</span></div></li>`;
 
 function renderAccounts() {
-  const head = `<div class="page-head"><div><h1>Accounts</h1><p>Credit cards and loans you're tracking.</p></div>
+  const head = `<div class="page-head"><div><h1>Accounts</h1><p>Debts and cash accounts you're tracking.</p></div>
     <div class="actions"><button class="btn primary" data-action="add-account">+ Add account</button></div></div>`;
   if (!state.accounts.length) return head + emptyState();
   const groups = Object.keys(TYPES).map(t => ({ t, list: state.accounts.filter(a => a.type === t) })).filter(g => g.list.length);
   return head + groups.map(g => `
-    <h3 class="muted" style="margin:6px 0 10px">${TYPES[g.t].label}${g.list.length > 1 ? 's' : ''}</h3>
+    <h3 class="muted" style="margin:6px 0 10px">${g.list.length > 1 ? TYPES[g.t].plural : TYPES[g.t].label}</h3>
     <div class="grid acct-grid" style="margin-bottom:22px">${g.list.map(acctCard).join('')}</div>`).join('');
 }
 function acctCard(a) {
@@ -412,22 +458,46 @@ function acctCard(a) {
     <div class="top"><div><div class="name">${esc(a.name)}</div><div class="muted small">${esc(a.lender || TYPES[a.type].label)}</div></div>${typeChip(a.type)}</div>
     <div><div class="muted small">Current balance</div><div class="bal">${money(bal)}</div></div>
     ${util != null ? `<div><div class="meter ${util >= 50 ? 'bad' : util >= 30 ? 'warn' : ''}"><span style="width:${Math.min(Math.max(util, 0), 100)}%"></span></div><div class="muted small" style="margin-top:4px">${pct(util, 1)} of ${money(a.creditLimit)} limit</div></div>` : ''}
-    <div class="kv">
+    ${isCash(a.type) ? cashKv(a, bal) : `<div class="kv">
       <div><span>APR</span><b>${pct(a.apr)}</b></div>
       ${hasRate(a.type) ? `<div><span>Interest rate</span><b>${pct(a.interestRate, 3)}</b></div>` : `<div><span>${isCard(a.type) ? 'Min. payment' : 'Payment'}</span><b>${a.payment ? money(a.payment) : '—'}</b></div>`}
       <div><span>Next due</span><b>${nd ? fmtDate(nd.date, { month: 'short', day: 'numeric' }) : '—'}</b></div>
-    </div></a>`;
+    </div>`}</a>`;
+}
+// Money in / out over the last 30 days (by effect on the balance, so it works for any cash account).
+function flows30(a) {
+  const from = addDays(todayISO(), -30);
+  return ledger(a).filter(t => t.date > from && t.date <= todayISO())
+    .reduce((s, t) => { if (t.effect > 0) s.in += t.effect; else s.out -= t.effect; return s; }, { in: 0, out: 0 });
+}
+function cashKv(a, bal) {
+  const f = flows30(a), last = ledger(a).filter(t => t.date <= todayISO()).pop();
+  return `<div class="kv">
+    ${a.type === 'savings' ? `<div><span>APY</span><b>${pct(a.apy)}</b></div><div><span>Interest / mo</span><b>${money(apyMonthly(bal, a.apy))}</b></div>`
+      : `<div><span>In · 30 days</span><b>${money(f.in)}</b></div><div><span>Out · 30 days</span><b>${money(f.out)}</b></div>`}
+    <div><span>Last activity</span><b>${last ? fmtDate(last.date, { month: 'short', day: 'numeric' }) : '—'}</b></div>
+  </div>`;
 }
 
+function cashStats(a, bal, totals) {
+  const f = flows30(a);
+  return `${a.type === 'savings' ? `<div class="card stat"><div class="label">APY</div><div class="value">${pct(a.apy)}</div><div class="sub">≈ ${money(apyMonthly(bal, a.apy))}/mo · ${money(Math.round(Math.max(bal, 0) * (a.apy || 0) / 100))}/yr interest</div></div>` : ''}
+    <div class="card stat"><div class="label">Money in · 30 days</div><div class="value">${money(f.in)}</div><div class="sub">Deposits${a.type === 'savings' ? ' and interest' : ''}</div></div>
+    <div class="card stat"><div class="label">Money out · 30 days</div><div class="value">${money(f.out)}</div><div class="sub">${a.type === 'checking' ? 'Purchases, withdrawals and fees' : 'Withdrawals and fees'}</div></div>
+    ${a.type === 'savings' ? `<div class="card stat"><div class="label">Interest earned</div><div class="value">${money(totals.int)}</div><div class="sub">Logged since ${fmtDate(a.startDate)}</div></div>` : ''}`;
+}
 function renderAccount(a) {
   const L = ledger(a), bal = currentBalance(a), p = payoff(a), nd = nextDue(a);
-  const loan = !isCard(a.type);
+  const loan = isLoan(a.type), cash = isCash(a.type);
   const totals = L.reduce((s, t) => {
     if (t.type === 'payment') { s.paid += t.amount; s.int += t.interest || 0; }
     if (t.type === 'interest') s.int += t.amount;
     if (t.type === 'purchase') s.purch += t.amount;
+    if (t.type === 'deposit') s.dep += t.amount;
+    if (t.type === 'withdrawal') s.wd += t.amount;
+    if (t.type === 'fee') s.fee += t.amount;
     return s;
-  }, { paid: 0, int: 0, purch: 0 });
+  }, { paid: 0, int: 0, purch: 0, dep: 0, wd: 0, fee: 0 });
   const util = isCard(a.type) && a.creditLimit ? bal / a.creditLimit * 100 : null;
   const filters = ['all', ...txTypesFor(a.type)].filter(f => f === 'all' || L.some(t => t.type === f));
   if (!filters.includes(ui.txFilter)) ui.txFilter = 'all';
@@ -438,28 +508,35 @@ function renderAccount(a) {
     <div class="detail-head" style="--c:${accColor(a)}"><div class="swatch">${esc(a.name.trim()[0] || '?').toUpperCase()}</div>
       <div><h1>${esc(a.name)}</h1><p>${typeChip(a.type)} ${a.lender ? `<span style="margin-left:6px">${esc(a.lender)}</span>` : ''}</p></div></div>
     <div class="actions">
-      ${isCard(a.type) ? `<button class="btn" data-action="add-tx" data-id="${a.id}" data-type="purchase">+ Purchase</button>` : ''}
+      ${cash ? `<button class="btn" data-action="add-tx" data-id="${a.id}" data-type="withdrawal">+ ${a.type === 'checking' ? 'Purchase / withdrawal' : 'Withdrawal'}</button>
+      <button class="btn primary" data-action="add-tx" data-id="${a.id}" data-type="deposit">+ Deposit</button>
+      <button class="btn" data-action="add-tx" data-id="${a.id}" data-type="${a.type === 'savings' ? 'interest' : 'fee'}">More…</button>`
+      : `${isCard(a.type) ? `<button class="btn" data-action="add-tx" data-id="${a.id}" data-type="purchase">+ Purchase</button>` : ''}
       <button class="btn primary" data-action="add-tx" data-id="${a.id}" data-type="payment">+ Payment</button>
-      <button class="btn" data-action="add-tx" data-id="${a.id}" data-type="${isCard(a.type) ? 'interest' : 'fee'}">More…</button>
+      <button class="btn" data-action="add-tx" data-id="${a.id}" data-type="${isCard(a.type) ? 'interest' : 'fee'}">More…</button>`}
       <button class="btn ghost" data-action="edit-account" data-id="${a.id}">Edit</button>
       <button class="btn ghost" data-action="delete-account" data-id="${a.id}">Delete</button>
     </div>
   </div>
   <div class="grid stats">
     <div class="card stat"><div class="label">Current balance</div><div class="value">${money(bal)}</div><div class="sub">Opening ${money(a.startBalance)} on ${fmtDate(a.startDate)}</div></div>
-    <div class="card stat"><div class="label">${hasRate(a.type) ? 'APR / interest rate' : 'APR'}</div><div class="value">${pct(a.apr)}</div><div class="sub">${hasRate(a.type) ? `Note rate ${pct(a.interestRate, 3)} · ` : ''}≈ ${money(Math.round(Math.max(bal, 0) * rateFor(a) / 1200))}/mo interest</div></div>
+    ${cash ? cashStats(a, bal, totals) : `<div class="card stat"><div class="label">${hasRate(a.type) ? 'APR / interest rate' : 'APR'}</div><div class="value">${pct(a.apr)}</div><div class="sub">${hasRate(a.type) ? `Note rate ${pct(a.interestRate, 3)} · ` : ''}≈ ${money(Math.round(Math.max(bal, 0) * rateFor(a) / 1200))}/mo interest</div></div>
     ${util != null ? `<div class="card stat"><div class="label">Utilization</div><div class="value">${pct(util, 1)}</div><div class="meter ${util >= 50 ? 'bad' : util >= 30 ? 'warn' : ''}" style="margin-top:8px"><span style="width:${Math.min(Math.max(util, 0), 100)}%"></span></div><div class="sub">${money(Math.max(a.creditLimit - bal, 0))} available</div></div>` : ''}
     <div class="card stat"><div class="label">${isCard(a.type) ? 'Minimum payment' : 'Monthly payment'}</div><div class="value">${a.payment ? money(a.payment) : '—'}</div><div class="sub">${nd ? `Next due ${fmtDate(nd.date, { month: 'short', day: 'numeric' })} · <span class="status ${nd.status}">${STATUS_LABEL[nd.status]}</span>` : a.dueDay ? `Due on day ${a.dueDay}` : 'No due day set'}</div></div>
-    <div class="card stat"><div class="label">Payoff at this payment</div><div class="value">${payoffText(p)}</div><div class="sub">${p && !p.never && p.months ? `${payoffDate(p)} · ${money(p.interest)} interest` : a.type === 'mortgage' && a.escrow ? 'Excludes escrow' : '&nbsp;'}</div></div>
+    <div class="card stat"><div class="label">Payoff at this payment</div><div class="value">${payoffText(p)}</div><div class="sub">${p && !p.never && p.months ? `${payoffDate(p)} · ${money(p.interest)} interest` : a.type === 'mortgage' && a.escrow ? 'Excludes escrow' : '&nbsp;'}</div></div>`}
   </div>
   <div class="grid two-col" style="margin-bottom:16px">
     <div class="card card-pad" style="--c:${accColor(a)}"><div style="display:flex;justify-content:space-between;align-items:center"><h2>Balance history</h2><span class="muted small">After each transaction</span></div>${balanceChart(a, L)}</div>
     <div class="card card-pad"><h2>Totals logged</h2>
-      <div class="preview" style="margin-top:12px">
+      <div class="preview" style="margin-top:12px">${cash ? `
+        <div><span>Deposits</span><b>${money(totals.dep)}</b></div>
+        <div><span>Withdrawals</span><b>${money(totals.wd)}</b></div>
+        <div><span>Interest earned</span><b>${money(totals.int)}</b></div>
+        <div><span>Fees</span><b>${money(totals.fee)}</b></div>` : `
         <div><span>Payments</span><b>${money(totals.paid)}</b></div>
         <div><span>Interest</span><b>${money(totals.int)}</b></div>
         ${isCard(a.type) ? `<div><span>Purchases</span><b>${money(totals.purch)}</b></div>` : `<div><span>Principal paid</span><b>${money(L.filter(t => t.type === 'payment').reduce((s, t) => s - t.effect, 0))}</b></div>`}
-        ${a.type === 'mortgage' ? `<div><span>Escrow</span><b>${money(L.reduce((s, t) => s + (t.escrow || 0), 0))}</b></div>` : ''}
+        ${a.type === 'mortgage' ? `<div><span>Escrow</span><b>${money(L.reduce((s, t) => s + (t.escrow || 0), 0))}</b></div>` : ''}`}
       </div>
       ${a.notes ? `<p class="muted small" style="margin:14px 0 0;white-space:pre-wrap">${esc(a.notes)}</p>` : ''}
     </div>
@@ -467,7 +544,7 @@ function renderAccount(a) {
   ${renderDocuments(a)}
   <div class="card">
     <div class="card-head"><h2>Transactions</h2>
-      <div class="filters">${filters.map(f => `<button data-action="filter" data-type="${f}" class="${ui.txFilter === f ? 'on' : ''}">${f === 'all' ? 'All' : TX_LABEL[f]}</button>`).join('')}</div></div>
+      <div class="filters">${filters.map(f => `<button data-action="filter" data-type="${f}" class="${ui.txFilter === f ? 'on' : ''}">${f === 'all' ? 'All' : txLabel(f, a.type)}</button>`).join('')}</div></div>
     <div class="table-wrap" style="margin-top:10px"><table>
       <thead><tr><th>Date</th><th>Type</th><th>Description</th><th class="num">Amount</th>
         ${loan ? `<th class="num">Interest</th>${a.type === 'mortgage' ? '<th class="num">Escrow</th>' : ''}<th class="num">Principal</th>` : '<th class="num">Change</th>'}
@@ -475,11 +552,11 @@ function renderAccount(a) {
       <tbody>
         ${shown.map(t => `<tr>
           <td class="num" style="text-align:left">${fmtDate(t.date)}</td>
-          <td><span class="chip">${TX_LABEL[t.type]}</span></td>
+          <td><span class="chip">${txLabel(t.type, a.type)}</span></td>
           <td>${esc(t.memo) || '<span class="muted">—</span>'}</td>
-          <td class="num">${money(t.type === 'adjustment' ? t.amount : t.amount)}</td>
+          <td class="num">${money(t.amount)}</td>
           ${loan ? `<td class="num">${t.type === 'payment' ? money(t.interest || 0) : '—'}</td>${a.type === 'mortgage' ? `<td class="num">${t.type === 'payment' ? money(t.escrow || 0) : '—'}</td>` : ''}` : ''}
-          <td class="num ${t.effect > 0 ? 'pos' : t.effect < 0 ? 'neg' : ''}">${t.effect > 0 ? '+' : t.effect < 0 ? '−' : ''}${money(Math.abs(t.effect))}</td>
+          <td class="num ${changeCls(t.effect, a.type)}">${t.effect > 0 ? '+' : t.effect < 0 ? '−' : ''}${money(Math.abs(t.effect))}</td>
           <td class="num"><b>${money(t.balanceAfter)}</b></td>
           <td class="num"><button class="icon-btn" data-action="edit-tx" data-id="${t.id}">Edit</button><button class="icon-btn del" data-action="delete-tx" data-id="${t.id}">Delete</button></td>
         </tr>`).join('')}
@@ -537,7 +614,7 @@ function renderCalendar() {
     const ds = dues[sel] || [], txs = (txByDay[sel] || []).sort(cmpTx);
     return `<div class="card-head"><h2>${fmtDate(sel, { weekday: 'long', month: 'long', day: 'numeric' })}</h2><button class="btn ghost xs" data-action="cal-day" data-date="">Month</button></div>
       ${ds.length ? `<ul class="list">${ds.map(dueItem).join('')}</ul>` : ''}
-      ${txs.length ? `<h3 class="muted" style="padding:10px 20px 0">Logged</h3><ul class="list">${txs.map(tx => { const a = getAcc(tx.accountId); return `<li data-action="open-account" data-id="${a.id}" style="cursor:pointer"><span class="dot" style="background:${accColor(a)}"></span><div class="grow"><b>${TX_LABEL[tx.type]}${tx.memo ? ' · ' + esc(tx.memo) : ''}</b><span class="muted small">${esc(a.name)}</span></div><div class="right">${money(tx.amount)}</div></li>`; }).join('')}</ul>` : ''}
+      ${txs.length ? `<h3 class="muted" style="padding:10px 20px 0">Logged</h3><ul class="list">${txs.map(tx => { const a = getAcc(tx.accountId); return `<li data-action="open-account" data-id="${a.id}" style="cursor:pointer"><span class="dot" style="background:${accColor(a)}"></span><div class="grow"><b>${txLabel(tx.type, a.type)}${tx.memo ? ' · ' + esc(tx.memo) : ''}</b><span class="muted small">${esc(a.name)}</span></div><div class="right">${money(tx.amount)}</div></li>`; }).join('')}</ul>` : ''}
       ${!ds.length && !txs.length ? '<div class="empty-line">Nothing due or logged on this day.</div>' : ''}`;
   })() : `<div class="card-head"><h2>Due in ${MONTHS[m]}</h2><span class="muted small">${money(monthTotal)}</span></div>
       ${monthDues.length ? `<ul class="list">${monthDues.map(dueItem).join('')}</ul>` : '<div class="empty-line">No payments due this month.</div>'}`;
@@ -558,7 +635,7 @@ function renderCalendar() {
           return `<button class="${cls}" data-action="cal-day" data-date="${d}">
             <span class="dnum">${parts(d)[2]}</span>
             ${ds.map(e => `<span class="ev ${e.status}" style="--c:${accColor(e.acc)}" title="${esc(e.acc.name)} — ${STATUS_LABEL[e.status]}"><span class="t">${esc(e.acc.name)}</span></span>`).join('')}
-            ${txs.length ? `<span class="pdots">${txs.slice(0, 8).map(tx => `<i class="${tx.type === 'payment' ? '' : 'purchase'}" title="${TX_LABEL[tx.type]} ${money(tx.amount)}"></i>`).join('')}</span>` : ''}
+            ${txs.length ? `<span class="pdots">${txs.slice(0, 8).map(tx => `<i class="${tx.type === 'payment' || tx.type === 'deposit' ? '' : 'purchase'}" title="${txLabel(tx.type, getAcc(tx.accountId).type)} ${money(tx.amount)}"></i>`).join('')}</span>` : ''}
           </button>`; }).join('')}
       </div>
       <div class="cal-legend">
@@ -589,6 +666,7 @@ const pctField = (name, val, extra = '') => `<div class="affix"><span class="suf
 
 /* ---------- documents (PDFs stored on the server, metadata in data.json) ---------- */
 const PDF_MAX = 25 * 1024 * 1024;
+const agreementLabel = t => t === 'credit_card' ? 'Cardholder agreement' : t === 'mortgage' ? 'Mortgage note / agreement' : isCash(t) ? 'Account agreement' : 'Loan agreement';
 const docsFor = (accId, kind) => state.documents.filter(d => d.accountId === accId && (!kind || d.kind === kind));
 const fmtSize = n => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 const monthLabel = ym => { const [y, m] = parts(ym + '-01'); return `${MONTHS[m - 1]} ${y}`; };
@@ -622,7 +700,7 @@ function renderDocuments(a) {
     <a class="icon-btn" href="${fileUrl(d)}" target="_blank" rel="noopener">View</a>
     <button class="icon-btn del" data-action="delete-doc" data-id="${d.id}">Delete</button></li>`;
   const meta = d => `${esc(d.name)} · ${fmtSize(d.size)}`;
-  const agrTitle = a.type === 'credit_card' ? 'Cardholder agreement' : a.type === 'mortgage' ? 'Mortgage note / agreement' : 'Loan agreement';
+  const agrTitle = agreementLabel(a.type);
   return `<div class="grid docs" style="margin-bottom:16px">
     <div class="card">
       <div class="card-head"><h2>${agrTitle}</h2><button class="btn sm" data-action="add-doc" data-id="${a.id}" data-type="agreement">+ Upload</button></div>
@@ -672,25 +750,26 @@ function openDocDialog(acc, kind) {
 /* ---------- account form ---------- */
 function openAccountDialog(acc) {
   const editing = !!acc;
-  const a = acc || { type: 'credit_card', name: '', lender: '', startBalance: null, startDate: todayISO(), apr: null, interestRate: null, creditLimit: null, payment: null, dueDay: null, originalAmount: null, termMonths: null, escrow: null, color: '', notes: '' };
+  const a = acc || { type: 'credit_card', name: '', lender: '', startBalance: null, startDate: todayISO(), apr: null, apy: null, interestRate: null, creditLimit: null, payment: null, dueDay: null, originalAmount: null, termMonths: null, escrow: null, color: '', notes: '' };
   const hasTx = editing && state.transactions.some(t => t.accountId === a.id);
   openModal(`<form class="modal-body" id="accForm" novalidate>
-    <header><h2>${editing ? 'Edit account' : 'Add account'}</h2><p>${editing ? esc(a.name) : 'Choose the type of debt and enter its details.'}</p></header>
+    <header><h2>${editing ? 'Edit account' : 'Add account'}</h2><p>${editing ? esc(a.name) : 'Choose the type of account and enter its details.'}</p></header>
     <div class="type-tiles">${Object.entries(TYPES).map(([k, v]) => `<label><input type="radio" name="type" value="${k}" ${a.type === k ? 'checked' : ''}><span class="tile" style="--c:${v.color}"><i></i>${v.label}</span></label>`).join('')}</div>
     <div class="form-grid">
       <label class="f full">Account name<input name="name" required maxlength="60" value="${esc(a.name)}" placeholder="e.g. Rewards Visa"></label>
-      <label class="f full">Lender / issuer <span class="hint">Optional</span><input name="lender" maxlength="60" value="${esc(a.lender)}"></label>
+      <label class="f full"><span><span id="lenderLabel">Lender / issuer</span> <span class="hint">Optional</span></span><input name="lender" maxlength="60" value="${esc(a.lender)}"></label>
       <label class="f">${hasTx ? 'Opening balance' : 'Current balance'}${moneyField('startBalance', centsIn(a.startBalance), 'required')}</label>
       <label class="f">Balance as of<input type="date" name="startDate" required value="${a.startDate}"></label>
-      <label class="f">APR${pctField('apr', a.apr, 'required')}</label>
+      <label class="f" data-types="credit_card personal_loan auto_loan mortgage">APR${pctField('apr', a.apr)}</label>
+      <label class="f" data-types="savings">APY <span class="hint">Annual percentage yield</span>${pctField('apy', a.apy)}</label>
       <label class="f" data-types="mortgage auto_loan">Interest rate <span class="hint">Note rate used to compute interest</span>${pctField('interestRate', a.interestRate)}</label>
       <label class="f" data-types="credit_card">Credit limit <span class="hint">Optional</span>${moneyField('creditLimit', centsIn(a.creditLimit))}</label>
       <label class="f" data-types="personal_loan auto_loan mortgage">Original amount <span class="hint">Optional</span>${moneyField('originalAmount', centsIn(a.originalAmount))}</label>
       <label class="f" data-types="personal_loan auto_loan mortgage">Term (months) <span class="hint">Optional</span><input name="termMonths" inputmode="numeric" value="${a.termMonths ?? ''}"></label>
       <label class="f" data-types="mortgage">Escrow per payment <span class="hint">Taxes &amp; insurance</span>${moneyField('escrow', centsIn(a.escrow))}</label>
-      <label class="f"><span id="payLabel">Minimum payment</span>
+      <label class="f" data-types="credit_card personal_loan auto_loan mortgage"><span id="payLabel">Minimum payment</span>
         <div class="inline">${moneyField('payment', centsIn(a.payment))}<button type="button" class="btn sm" id="calcPay" data-types="personal_loan auto_loan mortgage" title="Compute from original amount, rate and term">Calc</button></div></label>
-      <label class="f">Due day of month <span class="hint">1–31 (shortened in shorter months)</span><input name="dueDay" type="number" min="1" max="31" value="${a.dueDay ?? ''}"></label>
+      <label class="f" data-types="credit_card personal_loan auto_loan mortgage">Due day of month <span class="hint">1–31 (shortened in shorter months)</span><input name="dueDay" type="number" min="1" max="31" value="${a.dueDay ?? ''}"></label>
       <label class="f">Color<input type="color" name="color" value="${a.color || TYPES[a.type].color}" style="height:38px;padding:4px"></label>
       <label class="f full">Notes <span class="hint">Optional</span><textarea name="notes" maxlength="500">${esc(a.notes)}</textarea></label>
       <label class="f full"><span><span id="agrLabel">Loan agreement</span> (PDF) <span class="hint">Optional · up to 25 MB${editing && docsFor(a.id, 'agreement').length ? ` · ${docsFor(a.id, 'agreement').length} already uploaded` : ''}</span></span><input type="file" name="agreement" accept="application/pdf,.pdf"></label>
@@ -706,7 +785,9 @@ function openAccountDialog(acc) {
     $$('[data-types]', f).forEach(el => el.hidden = !el.dataset.types.split(' ').includes(type));
     $('#payLabel').textContent = type === 'credit_card' ? 'Minimum payment' : type === 'mortgage' ? 'Monthly payment (incl. escrow)' : 'Monthly payment';
     if (!colorTouched) f.color.value = TYPES[type].color;
-    $('#agrLabel').textContent = type === 'credit_card' ? 'Cardholder agreement' : type === 'mortgage' ? 'Mortgage note / agreement' : 'Loan agreement';
+    $('#agrLabel').textContent = agreementLabel(type);
+    $('#lenderLabel').textContent = isCash(type) ? 'Bank / institution' : 'Lender / issuer';
+    f.name.placeholder = type === 'checking' ? 'e.g. Everyday Checking' : type === 'savings' ? 'e.g. High-Yield Savings' : 'e.g. Rewards Visa';
   };
   f.addEventListener('change', e => { if (e.target.name === 'type') sync(); if (e.target.name === 'color') colorTouched = true; });
   sync();
@@ -727,19 +808,21 @@ function openAccountDialog(acc) {
     const d = {
       type, name: f.name.value.trim(), lender: f.lender.value.trim(),
       startBalance: toCents(f.startBalance.value), startDate: f.startDate.value,
-      apr: toNum(f.apr.value), interestRate: hasRate(type) ? toNum(f.interestRate.value) : null,
+      apr: isCash(type) ? null : toNum(f.apr.value), apy: type === 'savings' ? toNum(f.apy.value) : null,
+      interestRate: hasRate(type) ? toNum(f.interestRate.value) : null,
       creditLimit: type === 'credit_card' && f.creditLimit.value.trim() ? toCents(f.creditLimit.value) : null,
-      originalAmount: type !== 'credit_card' && f.originalAmount.value.trim() ? toCents(f.originalAmount.value) : null,
-      termMonths: type !== 'credit_card' && f.termMonths.value.trim() ? parseInt(f.termMonths.value, 10) : null,
+      originalAmount: isLoan(type) && f.originalAmount.value.trim() ? toCents(f.originalAmount.value) : null,
+      termMonths: isLoan(type) && f.termMonths.value.trim() ? parseInt(f.termMonths.value, 10) : null,
       escrow: type === 'mortgage' && f.escrow.value.trim() ? toCents(f.escrow.value) : null,
-      payment: f.payment.value.trim() ? toCents(f.payment.value) : null,
-      dueDay: f.dueDay.value.trim() ? parseInt(f.dueDay.value, 10) : null,
+      payment: !isCash(type) && f.payment.value.trim() ? toCents(f.payment.value) : null,
+      dueDay: !isCash(type) && f.dueDay.value.trim() ? parseInt(f.dueDay.value, 10) : null,
       color: colorTouched ? f.color.value : '', notes: f.notes.value.trim(),
     };
     if (!d.name) return err('Enter an account name.');
     if (isNaN(d.startBalance)) return err('Enter a valid balance.');
     if (!d.startDate) return err('Enter the date the balance is as of.');
-    if (isNaN(d.apr) || d.apr < 0 || d.apr > 100) return err('APR must be between 0 and 100.');
+    if (!isCash(type) && (isNaN(d.apr) || d.apr < 0 || d.apr > 100)) return err('APR must be between 0 and 100.');
+    if (type === 'savings' && (isNaN(d.apy) || d.apy < 0 || d.apy > 100)) return err('APY is required for savings accounts (0–100; enter 0 if none).');
     if (hasRate(type) && (isNaN(d.interestRate) || d.interestRate < 0 || d.interestRate > 100)) return err('Interest rate is required for mortgages and auto loans (0–100).');
     for (const k of ['creditLimit', 'originalAmount', 'escrow', 'payment']) if (d[k] != null && (isNaN(d[k]) || d[k] < 0)) return err('Check the dollar amounts — they must be valid, non-negative numbers.');
     if (d.termMonths != null && !(d.termMonths > 0)) return err('Term must be a positive number of months.');
@@ -747,9 +830,10 @@ function openAccountDialog(acc) {
     if (editing) {
       const early = state.transactions.find(t => t.accountId === a.id && t.date < d.startDate);
       if (early) return err(`A transaction is dated ${fmtDate(early.date)}, before the new balance date. Move the date earlier.`);
+      if (a.type !== type && hasTx && isCash(a.type) !== isCash(type)) return err(`A ${isCash(a.type) ? 'cash' : 'debt'} account with transactions can't become a ${isCash(type) ? 'cash' : 'debt'} account: deposits and payments would change meaning.`);
       if (a.type !== type) {
         const bad = state.transactions.find(t => t.accountId === a.id && !txTypesFor(type).includes(t.type));
-        if (bad) return err(`This account has ${TX_LABEL[bad.type].toLowerCase()} entries that a ${TYPES[type].label.toLowerCase()} can't hold.`);
+        if (bad) return err(`This account has ${txLabel(bad.type, a.type).toLowerCase()} entries that a ${TYPES[type].label.toLowerCase()} account can't hold.`);
       }
     }
     const fileErr = pdfProblem(file); if (fileErr) return err(fileErr);
@@ -772,11 +856,11 @@ function openAccountDialog(acc) {
 function openTxDialog(acc, tx, presetType) {
   const editing = !!tx;
   const types = txTypesFor(acc.type);
-  const loan = !isCard(acc.type);
-  const t = tx || { type: types.includes(presetType) ? presetType : 'payment', date: todayISO(), amount: null, interest: null, escrow: acc.type === 'mortgage' ? acc.escrow : null, memo: '' };
+  const loan = isLoan(acc.type);
+  const t = tx || { type: types.includes(presetType) ? presetType : types.includes('payment') ? 'payment' : types[0], date: todayISO(), amount: null, interest: null, escrow: acc.type === 'mortgage' ? acc.escrow : null, memo: '' };
   openModal(`<form class="modal-body" id="txForm" novalidate>
     <header><h2>${editing ? 'Edit transaction' : 'Log transaction'}</h2><p>${esc(acc.name)} · ${TYPES[acc.type].label}</p></header>
-    <div class="seg">${types.map(k => `<label><input type="radio" name="type" value="${k}" ${t.type === k ? 'checked' : ''}><span>${TX_LABEL[k]}</span></label>`).join('')}</div>
+    <div class="seg">${types.map(k => `<label><input type="radio" name="type" value="${k}" ${t.type === k ? 'checked' : ''}><span>${txLabel(k, acc.type)}</span></label>`).join('')}</div>
     <div class="form-grid">
       <label class="f">Date<input type="date" name="date" required min="${acc.startDate}" value="${t.date}"></label>
       <label class="f"><span id="amtLabel">Amount</span><div class="inline">${moneyField('amount', centsIn(t.amount == null ? null : Math.abs(t.amount)), 'required')}<button type="button" class="btn sm" id="fillPay" title="Use the account's payment amount">${acc.payment ? 'Use ' + money(acc.payment) : ''}</button></div></label>
@@ -813,16 +897,16 @@ function openTxDialog(acc, tx, presetType) {
     const type = f.type.value;
     $$('[data-when]', f).forEach(el => el.hidden = el.dataset.when !== type);
     if (fill) fill.hidden = type !== 'payment';
-    $('#amtLabel').textContent = type === 'interest' ? 'Interest charged' : type === 'payment' && loan ? 'Total payment' : 'Amount';
+    $('#amtLabel').textContent = type === 'interest' ? (isCash(acc.type) ? 'Interest earned' : 'Interest charged') : type === 'payment' && loan ? 'Total payment' : 'Amount';
     if (type === 'payment' && loan && !intTouched) autoInterest();
-    else if (type === 'interest' && f.date.value) {
-      const s = estimateCardInterest(acc, f.date.value, exId);
+    else if (type === 'interest' && f.date.value && (isCard(acc.type) || (acc.type === 'savings' && acc.apy > 0))) {
+      const s = isCard(acc.type) ? estimateCardInterest(acc, f.date.value, exId) : estimateSavingsInterest(acc, f.date.value, exId);
       $('#txNote').innerHTML = `Estimate: <b>${money(s.cents)}</b> — ${esc(s.why)}. <button type="button" class="btn xs" id="useEst">Use estimate</button> Use the exact figure from your statement when you have it.`;
       $('#useEst').onclick = () => { f.amount.value = centsIn(s.cents); update(); };
     } else if (!(type === 'payment' && loan)) $('#txNote').textContent = '';
     const o = read(), prev = $('#txPrev');
     if (!o.date || isNaN(o.amount)) { prev.innerHTML = `<div><span>Balance before</span><b>${o.date ? money(balanceOn(acc, o.date, exId)) : '—'}</b></div>`; return; }
-    const before = balanceOn(acc, o.date, exId), eff = effect(o), after = before + eff;
+    const before = balanceOn(acc, o.date, exId), eff = effect(o, acc.type), after = before + eff;
     const later = txsFor(acc.id, exId).some(x => x.date > o.date);
     prev.innerHTML = `<div><span>Balance before</span><b>${money(before)}</b></div>
       ${type === 'payment' && loan ? `<div><span>Principal</span><b class="${-eff < 0 ? 'pos' : ''}">${money(-eff)}</b></div>` : ''}
@@ -848,7 +932,7 @@ function openTxDialog(acc, tx, presetType) {
     if (!(o.type === 'payment' && loan)) { delete rec.interest; delete rec.escrow; }
     if (editing) { delete tx.interest; delete tx.escrow; touch(Object.assign(tx, rec)); }
     else state.transactions.push({ id: uid(), accountId: acc.id, createdAt: Date.now(), updatedAt: Date.now(), ...rec });
-    save(); closeModal(); toast(editing ? 'Transaction updated' : `${TX_LABEL[o.type]} logged`); rerender();
+    save(); closeModal(); toast(editing ? 'Transaction updated' : `${txLabel(o.type, acc.type)} logged`); rerender();
   };
 }
 
@@ -909,6 +993,24 @@ function loadSample() {
   mort.payment = amortPayment(mort.originalAmount, mort.interestRate, mort.termMonths) + mort.escrow;
   dues(mort).forEach(d => pay(mort, d, mort.payment, 'Mortgage payment'));
 
+  const chk = mk({ type: 'checking', name: 'Everyday Checking', lender: 'Harbor Bank', startBalance: 324150 });
+  for (let d = 4; d <= 100; d += 14) tx(chk, { type: 'deposit', date: addDays(start, d), amount: 268450, memo: 'Paycheck' });
+  [['Groceries', 6, 9312], ['Electric bill', 11, 14260], ['Coffee', 13, 645], ['Gas', 19, 5210], ['Internet', 25, 7999], ['Groceries', 34, 10488],
+   ['Phone bill', 41, 6500], ['Pharmacy', 52, 2318], ['Groceries', 63, 8774], ['Electric bill', 71, 12895], ['Gas', 80, 4870], ['Groceries', 91, 9926]]
+    .forEach(([memo, d, c]) => tx(chk, { type: 'withdrawal', date: addDays(start, d), amount: c, memo }));
+  tx(chk, { type: 'fee', date: addDays(start, 30), amount: 300, memo: 'Out-of-network ATM fee' });
+
+  const sav = mk({ type: 'savings', name: 'High-Yield Savings', lender: 'Summit Credit Union', startBalance: 1250000, apy: 4.1 });
+  const [sy, sm] = parts(start);
+  for (let k = 0; k < 4; k++) {   // monthly transfer from checking
+    const transfer = addDays(start, 15 + k * 30);
+    if (transfer <= T) { tx(chk, { type: 'withdrawal', date: transfer, amount: 50000, memo: 'Transfer to savings' }); tx(sav, { type: 'deposit', date: transfer, amount: 50000, memo: 'Transfer from checking' }); }
+  }
+  for (let k = 0; k < 4; k++) {   // interest credited on the last day of each month, in date order
+    const d = new Date(sy, sm + k, 0), last = ymd(d.getFullYear(), d.getMonth(), d.getDate());
+    if (last > start && last <= T) tx(sav, { type: 'interest', date: last, amount: estimateSavingsInterest(sav, last).cents, memo: 'Monthly interest' });
+  }
+
   save(); toast('Sample data loaded'); rerender();
 }
 
@@ -939,7 +1041,7 @@ document.addEventListener('click', async e => {
     case 'edit-tx': { const t = state.transactions.find(x => x.id === id); openTxDialog(getAcc(t.accountId), t); break; }
     case 'delete-tx': {
       const t = state.transactions.find(x => x.id === id);
-      if (await confirmBox('Delete transaction?', `${TX_LABEL[t.type]} of ${money(Math.abs(t.amount))} on ${fmtDate(t.date)}. Balances after it will be recalculated.`)) {
+      if (await confirmBox('Delete transaction?', `${txLabel(t.type, getAcc(t.accountId).type)} of ${money(Math.abs(t.amount))} on ${fmtDate(t.date)}. Balances after it will be recalculated.`)) {
         tombstone(id); state.transactions = state.transactions.filter(x => x.id !== id); save(); toast('Transaction deleted'); rerender();
       }
       break;
