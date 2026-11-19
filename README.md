@@ -2,7 +2,8 @@
 
 A self-hosted web app for tracking credit cards, personal loans, auto loans and mortgages:
 balances, APR and interest rates, purchases, payments split into interest and principal,
-a running balance after every transaction, and a calendar of payment due dates.
+a running balance after every transaction, a calendar of payment due dates, and storage for
+loan agreements and monthly statements (PDF).
 
 Single-user, password-protected, no external dependencies. The backend is one Python file (standard library only)
 and data is a single JSON file on the server.
@@ -36,7 +37,7 @@ paydown status        # service status
 paydown logs          # recent logs
 paydown update        # pull the latest code from git and restart (data untouched)
 paydown passwd        # change the password (signs out all devices)
-paydown backup FILE   # copy data.json somewhere
+paydown backup FILE   # data.json + uploaded PDFs as a .tar.gz
 paydown restart
 ```
 
@@ -48,12 +49,15 @@ You can also change the password in the app (sidebar → Password).
 |---|---|
 | `/opt/paydown` | app code (git checkout) |
 | `/var/lib/paydown/data.json` | all accounts and transactions |
-| `/var/lib/paydown/backups/` | automatic daily snapshot, last 30 days |
+| `/var/lib/paydown/files/` | uploaded PDFs (agreements, statements) |
+| `/var/lib/paydown/trash/` | deleted PDFs, purged after 30 days |
+| `/var/lib/paydown/backups/` | automatic daily snapshot of `data.json`, last 30 days |
 | `/var/lib/paydown/auth.json` | password hash and session key (mode 600) |
 | `/etc/paydown.env` | `PAYDOWN_HOST`, `PAYDOWN_PORT`, `PAYDOWN_DATA_DIR` |
 
-Proxmox backups of the container include the data. To move to a new container, install there and copy `data.json` into
-`/var/lib/paydown/` (owned by `paydown`), then `paydown restart`.
+Proxmox backups of the container include all of it. To move to a new container, install there, then extract a
+`paydown backup` archive into `/var/lib/paydown/` (`chown -R paydown:paydown /var/lib/paydown`) and `paydown restart`.
+The in-app Export is JSON only and does not include PDFs.
 
 ## Security notes
 
@@ -67,6 +71,19 @@ Proxmox backups of the container include the data. To move to a new container, i
   so another reason to keep 8787 LAN-only.
 - Only the app's own UI files are served; the source, data and config are never served over HTTP.
 - Health check: `GET /healthz` (no login required).
+
+## Documents
+
+Each account has a section for its agreement (loan agreement, mortgage note, or cardholder agreement) and
+for monthly statements, each tagged with its statement month. You can also attach the agreement when adding
+or editing an account. PDFs only, up to 25 MB each.
+
+PDFs are stored only in the data directory on the server and are served only to signed-in users. They never go into
+the git repository: the server refuses to use a data directory inside the app's git checkout (except the
+git-ignored `./data` used for development), and `.gitignore` excludes PDFs and data files.
+
+**Reverse proxy upload limit:** nginx-based proxies (including Nginx Proxy Manager) reject uploads over 1 MB by default.
+Add `client_max_body_size 25m;` (in NPM: the proxy host's *Advanced* tab). Caddy and Traefik have no small default limit.
 
 ## Multiple devices
 

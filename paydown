@@ -27,8 +27,9 @@ case "${1:-}" in
     [[ $OLD == "$NEW" ]] && echo "Already up to date ($NEW)." || echo "Updated $OLD -> $NEW and restarted."
     ;;
   backup)
-    OUT="${2:-$PWD/paydown-$(date +%F).json}"
-    cp "$DATA_DIR/data.json" "$OUT" && echo "Saved $OUT"
+    OUT="${2:-$PWD/paydown-$(date +%F).tar.gz}"
+    ITEMS=(data.json); [[ -d $DATA_DIR/files ]] && ITEMS+=(files)
+    tar -czf "$OUT" -C "$DATA_DIR" "${ITEMS[@]}" && chmod 600 "$OUT" && echo "Saved $OUT (data + uploaded PDFs)"
     ;;
   *)
     cat <<EOF
@@ -38,7 +39,7 @@ Usage: paydown <command>
   restart           restart the service
   update            pull the latest code from git and restart (data untouched)
   passwd            change the login password (signs out all sessions)
-  backup [FILE]     copy data.json to FILE
+  backup [FILE]     save data.json and uploaded PDFs to FILE (.tar.gz)
 Data: $DATA_DIR   Settings: $ENV_FILE
 EOF
     ;;

@@ -59,10 +59,11 @@ const THEME_KEY = 'paydown:theme';
 const ui = { calY: null, calM: null, calSel: null, txFilter: 'all' };
 const store = { etag: null, dirty: false, saving: false, error: '', timer: null };
 
-const emptyData = () => ({ version: 2, accounts: [], transactions: [], deleted: {} });
+const emptyData = () => ({ version: 2, accounts: [], transactions: [], documents: [], deleted: {} });
 function normalize(s) {
   if (!s || !Array.isArray(s.accounts)) return emptyData();
-  return { version: 2, accounts: s.accounts, transactions: Array.isArray(s.transactions) ? s.transactions : [], deleted: s.deleted && typeof s.deleted === 'object' ? s.deleted : {} };
+  const arr = x => Array.isArray(x) ? x : [];
+  return { version: 2, accounts: s.accounts, transactions: arr(s.transactions), documents: arr(s.documents), deleted: s.deleted && typeof s.deleted === 'object' ? s.deleted : {} };
 }
 let state = emptyData();
 
@@ -81,9 +82,10 @@ function merge(a, b) {
   const accounts = pick(a.accounts, b.accounts);
   const ids = new Set(accounts.map(x => x.id));
   const transactions = pick(a.transactions, b.transactions).filter(t => ids.has(t.accountId));
+  const documents = pick(a.documents || [], b.documents || []).filter(d => ids.has(d.accountId));
   const cutoff = Date.now() - 365 * 864e5;   // keep the file small
   for (const k of Object.keys(deleted)) if (deleted[k] < cutoff) delete deleted[k];
-  return { version: 2, accounts, transactions, deleted };
+  return { version: 2, accounts, transactions, documents, deleted };
 }
 
 // fetch wrapper: a 401 means the session expired -> back to the login page.
@@ -462,6 +464,7 @@ function renderAccount(a) {
       ${a.notes ? `<p class="muted small" style="margin:14px 0 0;white-space:pre-wrap">${esc(a.notes)}</p>` : ''}
     </div>
   </div>
+  ${renderDocuments(a)}
   <div class="card">
     <div class="card-head"><h2>Transactions</h2>
       <div class="filters">${filters.map(f => `<button data-action="filter" data-type="${f}" class="${ui.txFilter === f ? 'on' : ''}">${f === 'all' ? 'All' : TX_LABEL[f]}</button>`).join('')}</div></div>
@@ -584,6 +587,88 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.ad
 const moneyField = (name, val, extra = '') => `<div class="affix"><span class="pre">$</span><input class="has-pre" name="${name}" inputmode="decimal" autocomplete="off" value="${esc(val)}" ${extra}></div>`;
 const pctField = (name, val, extra = '') => `<div class="affix"><span class="suf">%</span><input class="has-suf" name="${name}" inputmode="decimal" autocomplete="off" value="${val ?? ''}" ${extra}></div>`;
 
+/* ---------- documents (PDFs stored on the server, metadata in data.json) ---------- */
+const PDF_MAX = 25 * 1024 * 1024;
+const docsFor = (accId, kind) => state.documents.filter(d => d.accountId === accId && (!kind || d.kind === kind));
+const fmtSize = n => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+const monthLabel = ym => { const [y, m] = parts(ym + '-01'); return `${MONTHS[m - 1]} ${y}`; };
+const fileUrl = d => `api/files/${d.id}?name=${encodeURIComponent(d.name)}`;
+function pdfProblem(file) {
+  if (!file) return '';
+  if (!(file.type === 'application/pdf' || /\.pdf$/i.test(file.name))) return 'Choose a PDF file.';
+  if (file.size > PDF_MAX) return 'PDF must be 25 MB or smaller.';
+  return '';
+}
+async function uploadPdf(file) {
+  let r;
+  try { r = await api('api/files', { method: 'POST', headers: { 'Content-Type': 'application/pdf' }, body: file }); }
+  catch { throw new Error('Upload failed — cannot reach the server.'); }
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 413 && !j.error) throw new Error('The file was rejected as too large (check your reverse proxy\'s upload limit).');
+  if (!r.ok) throw new Error(j.error || `Upload failed (${r.status}).`);
+  return j;
+}
+function addDocument(accountId, kind, file, uploaded, extra = {}) {
+  state.documents.push({ id: uploaded.id, accountId, kind, name: file.name, size: uploaded.size, createdAt: Date.now(), updatedAt: Date.now(), ...extra });
+}
+const deleteFile = id => api(`api/files/${id}`, { method: 'DELETE' }).catch(() => { /* tidied up on the server later */ });
+
+function renderDocuments(a) {
+  const agreements = docsFor(a.id, 'agreement').sort((x, y) => y.createdAt - x.createdAt);
+  const statements = docsFor(a.id, 'statement').sort((x, y) => (y.period || '').localeCompare(x.period || '') || y.createdAt - x.createdAt);
+  const row = (d, title, sub) => `<li>
+    <span class="pdf-ico" aria-hidden="true">PDF</span>
+    <div class="grow"><a href="${fileUrl(d)}" target="_blank" rel="noopener"><b>${esc(title)}</b></a><span class="muted small">${sub}</span></div>
+    <a class="icon-btn" href="${fileUrl(d)}" target="_blank" rel="noopener">View</a>
+    <button class="icon-btn del" data-action="delete-doc" data-id="${d.id}">Delete</button></li>`;
+  const meta = d => `${esc(d.name)} · ${fmtSize(d.size)}`;
+  const agrTitle = a.type === 'credit_card' ? 'Cardholder agreement' : a.type === 'mortgage' ? 'Mortgage note / agreement' : 'Loan agreement';
+  return `<div class="grid docs" style="margin-bottom:16px">
+    <div class="card">
+      <div class="card-head"><h2>${agrTitle}</h2><button class="btn sm" data-action="add-doc" data-id="${a.id}" data-type="agreement">+ Upload</button></div>
+      ${agreements.length ? `<ul class="list doc-list">${agreements.map(d => row(d, d.note || d.name, `${d.note ? meta(d) : fmtSize(d.size)} · added ${fmtDate(new Date(d.createdAt).toISOString().slice(0, 10))}`)).join('')}</ul>`
+        : '<div class="empty-line">No agreement uploaded.</div>'}
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Monthly statements</h2><button class="btn sm" data-action="add-doc" data-id="${a.id}" data-type="statement">+ Upload</button></div>
+      ${statements.length ? `<ul class="list doc-list">${statements.map(d => row(d, d.period ? monthLabel(d.period) : d.name, `${meta(d)}${d.note ? ' · ' + esc(d.note) : ''}`)).join('')}</ul>`
+        : '<div class="empty-line">No statements uploaded.</div>'}
+    </div>
+  </div>`;
+}
+
+function openDocDialog(acc, kind) {
+  const isStmt = kind === 'statement';
+  const t = new Date(); const prev = new Date(t.getFullYear(), t.getMonth() - 1, 1);
+  const defMonth = `${prev.getFullYear()}-${pad(prev.getMonth() + 1)}`;
+  openModal(`<form class="modal-body" id="docForm" novalidate>
+    <header><h2>Upload ${isStmt ? 'monthly statement' : 'agreement'}</h2><p>${esc(acc.name)}</p></header>
+    <label class="f">PDF file <span class="hint">Up to 25 MB</span><input type="file" name="file" accept="application/pdf,.pdf" required></label>
+    ${isStmt ? `<label class="f">Statement month<input type="month" name="period" required value="${defMonth}"></label>` : ''}
+    <label class="f">${isStmt ? 'Note' : 'Title'} <span class="hint">Optional${isStmt ? '' : ' — e.g. Original agreement, Rate modification'}</span><input name="note" maxlength="80"></label>
+    <p class="error" id="docErr"></p>
+    <footer><button type="button" class="btn" data-action="close">Cancel</button><button class="btn primary">Upload</button></footer>
+  </form>`);
+  const f = $('#docForm');
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const err = m => { $('#docErr').textContent = m; };
+    const file = f.file.files[0];
+    if (!file) return err('Choose a PDF to upload.');
+    const problem = pdfProblem(file); if (problem) return err(problem);
+    if (isStmt && !/^\d{4}-\d{2}$/.test(f.period.value)) return err('Choose the statement month.');
+    if (isStmt && docsFor(acc.id, 'statement').some(d => d.period === f.period.value) && !f.dataset.dupOk) {
+      f.dataset.dupOk = '1'; return err(`A statement for ${monthLabel(f.period.value)} already exists. Click Upload again to add another.`);
+    }
+    const btn = f.querySelector('footer .primary'); btn.disabled = true; btn.textContent = 'Uploading…';
+    try {
+      const up = await uploadPdf(file);
+      addDocument(acc.id, kind, file, up, { ...(isStmt ? { period: f.period.value } : {}), ...(f.note.value.trim() ? { note: f.note.value.trim() } : {}) });
+      save(); closeModal(); toast(isStmt ? 'Statement uploaded' : 'Agreement uploaded'); rerender();
+    } catch (x) { err(x.message); btn.disabled = false; btn.textContent = 'Upload'; }
+  };
+}
+
 /* ---------- account form ---------- */
 function openAccountDialog(acc) {
   const editing = !!acc;
@@ -608,6 +693,7 @@ function openAccountDialog(acc) {
       <label class="f">Due day of month <span class="hint">1–31 (shortened in shorter months)</span><input name="dueDay" type="number" min="1" max="31" value="${a.dueDay ?? ''}"></label>
       <label class="f">Color<input type="color" name="color" value="${a.color || TYPES[a.type].color}" style="height:38px;padding:4px"></label>
       <label class="f full">Notes <span class="hint">Optional</span><textarea name="notes" maxlength="500">${esc(a.notes)}</textarea></label>
+      <label class="f full"><span><span id="agrLabel">Loan agreement</span> (PDF) <span class="hint">Optional · up to 25 MB${editing && docsFor(a.id, 'agreement').length ? ` · ${docsFor(a.id, 'agreement').length} already uploaded` : ''}</span></span><input type="file" name="agreement" accept="application/pdf,.pdf"></label>
     </div>
     <p class="note" id="calcNote"></p>
     <p class="error" id="accErr"></p>
@@ -620,6 +706,7 @@ function openAccountDialog(acc) {
     $$('[data-types]', f).forEach(el => el.hidden = !el.dataset.types.split(' ').includes(type));
     $('#payLabel').textContent = type === 'credit_card' ? 'Minimum payment' : type === 'mortgage' ? 'Monthly payment (incl. escrow)' : 'Monthly payment';
     if (!colorTouched) f.color.value = TYPES[type].color;
+    $('#agrLabel').textContent = type === 'credit_card' ? 'Cardholder agreement' : type === 'mortgage' ? 'Mortgage note / agreement' : 'Loan agreement';
   };
   f.addEventListener('change', e => { if (e.target.name === 'type') sync(); if (e.target.name === 'color') colorTouched = true; });
   sync();
@@ -633,9 +720,10 @@ function openAccountDialog(acc) {
     f.payment.value = centsIn(pay + esc_);
     $('#calcNote').textContent = `Principal & interest: ${money(pay)}${esc_ ? ` + escrow ${money(esc_)}` : ''} (${n} months at ${pct(rate, 3)}).`;
   };
-  f.onsubmit = e => {
+  f.onsubmit = async e => {
     e.preventDefault();
     const type = f.type.value, err = m => { $('#accErr').textContent = m; };
+    const file = f.agreement.files[0];
     const d = {
       type, name: f.name.value.trim(), lender: f.lender.value.trim(),
       startBalance: toCents(f.startBalance.value), startDate: f.startDate.value,
@@ -663,12 +751,20 @@ function openAccountDialog(acc) {
         const bad = state.transactions.find(t => t.accountId === a.id && !txTypesFor(type).includes(t.type));
         if (bad) return err(`This account has ${TX_LABEL[bad.type].toLowerCase()} entries that a ${TYPES[type].label.toLowerCase()} can't hold.`);
       }
-      touch(Object.assign(acc, d));
-    } else {
-      state.accounts.push({ id: uid(), createdAt: Date.now(), updatedAt: Date.now(), ...d });
     }
+    const fileErr = pdfProblem(file); if (fileErr) return err(fileErr);
+    const accId = editing ? a.id : uid();
+    let doc = null;
+    if (file) {
+      const btn = f.querySelector('footer .primary'); btn.disabled = true; btn.textContent = 'Uploading…';
+      try { doc = await uploadPdf(file); }
+      catch (x) { btn.disabled = false; btn.textContent = editing ? 'Save changes' : 'Add account'; return err(x.message); }
+    }
+    if (editing) touch(Object.assign(acc, d));
+    else state.accounts.push({ id: accId, createdAt: Date.now(), updatedAt: Date.now(), ...d });
+    if (doc) addDocument(accId, 'agreement', file, doc);
     save(); closeModal(); toast(editing ? 'Account updated' : 'Account added');
-    if (!editing) location.hash = `#/account/${state.accounts[state.accounts.length - 1].id}`; else rerender();
+    if (!editing) location.hash = `#/account/${accId}`; else rerender();
   };
 }
 
@@ -827,11 +923,14 @@ document.addEventListener('click', async e => {
     case 'open-account': location.hash = `#/account/${id}`; break;
     case 'delete-account': {
       const a = getAcc(id); const n = state.transactions.filter(t => t.accountId === id).length;
-      if (await confirmBox('Delete account?', `“${esc(a.name)}” and its ${n} transaction${n === 1 ? '' : 's'} will be permanently removed.`)) {
+      const docs = docsFor(id);
+      if (await confirmBox('Delete account?', `“${esc(a.name)}”, its ${n} transaction${n === 1 ? '' : 's'}${docs.length ? ` and ${docs.length} document${docs.length === 1 ? '' : 's'}` : ''} will be permanently removed.`)) {
         tombstone(id);
         state.transactions.filter(t => t.accountId === id).forEach(t => tombstone(t.id));
+        docs.forEach(d => { tombstone(d.id); deleteFile(d.id); });
         state.accounts = state.accounts.filter(x => x.id !== id);
         state.transactions = state.transactions.filter(t => t.accountId !== id);
+        state.documents = state.documents.filter(d => d.accountId !== id);
         save(); toast('Account deleted'); location.hash = '#/accounts';
       }
       break;
@@ -846,6 +945,15 @@ document.addEventListener('click', async e => {
       break;
     }
     case 'filter': ui.txFilter = type; rerender(); break;
+    case 'add-doc': openDocDialog(getAcc(id), type); break;
+    case 'delete-doc': {
+      const d = state.documents.find(x => x.id === id);
+      if (await confirmBox('Delete document?', `“${esc(d.name)}” will be removed. It stays in the server's trash for 30 days.`)) {
+        tombstone(id); state.documents = state.documents.filter(x => x.id !== id);
+        deleteFile(id); save(); toast('Document deleted'); rerender();
+      }
+      break;
+    }
     case 'cal-nav': {
       if (type === '0') { const t = new Date(); ui.calY = t.getFullYear(); ui.calM = t.getMonth(); ui.calSel = todayISO(); }
       else { const d = new Date(ui.calY, ui.calM + Number(type), 1); ui.calY = d.getFullYear(); ui.calM = d.getMonth(); ui.calSel = null; }
@@ -886,11 +994,10 @@ $('#importFile').addEventListener('change', async e => {
     if (state.accounts.length && !(await confirmBox('Replace current data?', `This will replace your ${state.accounts.length} account(s) with ${data.accounts.length} from the file.`, 'Replace'))) return;
     // Replace: tombstone current records so the replacement also wins on other synced machines.
     const now = Date.now();
-    [...state.accounts, ...state.transactions].forEach(x => tombstone(x.id));
+    [...state.accounts, ...state.transactions, ...state.documents].forEach(x => tombstone(x.id));
     const imp = normalize(data);
-    imp.accounts.forEach(a => { a.updatedAt = now + 1; delete state.deleted[a.id]; });
-    imp.transactions.forEach(t => { t.updatedAt = now + 1; delete state.deleted[t.id]; });
-    state = { version: 2, accounts: imp.accounts, transactions: imp.transactions, deleted: state.deleted };
+    [...imp.accounts, ...imp.transactions, ...imp.documents].forEach(x => { x.updatedAt = now + 1; delete state.deleted[x.id]; });
+    state = { version: 2, accounts: imp.accounts, transactions: imp.transactions, documents: imp.documents, deleted: state.deleted };
     save(); toast('Data imported'); rerender();
   } catch { toast('That file is not a valid Paydown export'); }
 });

@@ -9,9 +9,12 @@ Standard library only (Python 3.9+).
 
 Settings can also come from the environment: PAYDOWN_HOST, PAYDOWN_PORT, PAYDOWN_DATA_DIR.
 The data directory holds:
-    data.json      all accounts and transactions
+    data.json      all accounts, transactions and document metadata
     auth.json      password hash + session signing key (mode 600)
-    backups/       one snapshot per day, last 30 kept
+    files/         uploaded PDFs (loan agreements, monthly statements)
+    trash/         deleted PDFs, kept 30 days
+    backups/       one snapshot of data.json per day, last 30 kept
+The data directory must be outside the app's git checkout (or the git-ignored ./data).
 """
 import argparse
 import getpass
@@ -19,6 +22,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -27,6 +31,7 @@ import time
 from datetime import date
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, quote, urlsplit
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC = {  # URL path -> (file, content type). Only these files are ever served.
@@ -43,6 +48,9 @@ COOKIE = "paydown_session"
 SESSION_DAYS = 30
 PBKDF2_ITERS = 600_000
 BACKUPS_KEPT = 30
+FILE_MAX = 25 * 1024 * 1024  # bytes per PDF
+FILE_ID = re.compile(r"^[0-9a-f]{32}$")
+TRASH_DAYS = 30
 
 LOCK = threading.Lock()
 DATA_DIR = ""
@@ -117,26 +125,72 @@ def read_data():
 
 
 def backup_today():
+    """Snapshot data.json once per day. Returns True when a new snapshot was made."""
     if not os.path.exists(p("data.json")):
-        return
+        return False
     bdir = p("backups")
     os.makedirs(bdir, exist_ok=True)
     target = os.path.join(bdir, f"data-{date.today().isoformat()}.json")
-    if not os.path.exists(target):
-        shutil.copy2(p("data.json"), target)
-        old = sorted(f for f in os.listdir(bdir) if f.startswith("data-") and f.endswith(".json"))
-        for f in old[:-BACKUPS_KEPT]:
-            os.remove(os.path.join(bdir, f))
+    if os.path.exists(target):
+        return False
+    shutil.copy2(p("data.json"), target)
+    old = sorted(f for f in os.listdir(bdir) if f.startswith("data-") and f.endswith(".json"))
+    for f in old[:-BACKUPS_KEPT]:
+        os.remove(os.path.join(bdir, f))
+    return True
 
 
 def write_data(raw):
-    backup_today()  # snapshot of the previous state, once per day
+    if backup_today():  # snapshot of the previous state, once per day
+        tidy_files()
     tmp = p(".data.json.tmp")
     with open(tmp, "wb") as f:
         f.write(raw)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, p("data.json"))
+
+
+# ---------- uploaded files ----------
+def file_path(fid):
+    return os.path.join(p("files"), fid + ".pdf")
+
+
+def trash_file(fid):
+    src = file_path(fid)
+    if not os.path.exists(src):
+        return False
+    os.makedirs(p("trash"), exist_ok=True)
+    dst = os.path.join(p("trash"), fid + ".pdf")
+    os.replace(src, dst)
+    os.utime(dst)  # mtime = deletion time, for the 30-day purge
+    return True
+
+
+def tidy_files():
+    """Purge old trash, and move PDFs that no document references (e.g. an upload whose
+    account was never saved) to the trash once they are a day old."""
+    now = time.time()
+    tdir = p("trash")
+    if os.path.isdir(tdir):
+        for f in os.listdir(tdir):
+            fp = os.path.join(tdir, f)
+            if now - os.path.getmtime(fp) > TRASH_DAYS * 86400:
+                os.remove(fp)
+    fdir = p("files")
+    raw, _ = read_data()
+    if not os.path.isdir(fdir) or raw is None:
+        return
+    try:
+        refs = {d.get("id") for d in json.loads(raw).get("documents", [])}
+    except (ValueError, AttributeError):
+        return
+    for f in os.listdir(fdir):
+        fid = f[:-4]
+        if f.endswith(".pdf") and FILE_ID.match(fid) and fid not in refs and now - os.path.getmtime(os.path.join(fdir, f)) > 86400:
+            trash_file(fid)
+        elif f.startswith(".upload-") and now - os.path.getmtime(os.path.join(fdir, f)) > 3600:
+            os.remove(os.path.join(fdir, f))  # interrupted upload
 
 
 # ---------- HTTP ----------
@@ -207,6 +261,68 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def file_id(self, path):
+        fid = path[len("/api/files/"):] if path.startswith("/api/files/") else ""
+        return fid if FILE_ID.match(fid) else None
+
+    def upload(self):
+        if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/pdf":
+            return self.send(415, {"error": "Only PDF files can be uploaded"})
+        try:
+            n = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self.send(411, {"error": "Content-Length required"})
+        if n <= 0 or n > FILE_MAX:
+            self.close_connection = True  # don't read an oversized body
+            return self.send(413, {"error": f"PDF must be {FILE_MAX // (1024 * 1024)} MB or smaller"})
+        os.makedirs(p("files"), exist_ok=True)
+        fid = secrets.token_hex(16)
+        tmp = os.path.join(p("files"), f".upload-{fid}")
+        head, left = b"", n
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                while left:
+                    chunk = self.rfile.read(min(65536, left))
+                    if not chunk:
+                        break
+                    if len(head) < 1024:
+                        head += chunk[:1024 - len(head)]
+                    f.write(chunk)
+                    left -= len(chunk)
+            if left:
+                raise ValueError("Upload was interrupted")
+            if b"%PDF-" not in head:
+                raise ValueError("That file is not a PDF")
+            os.replace(tmp, file_path(fid))
+        except ValueError as e:
+            os.path.exists(tmp) and os.remove(tmp)
+            return self.send(400, {"error": str(e)})
+        return self.send(201, {"id": fid, "size": n})
+
+    def download(self, fid):
+        try:
+            with open(file_path(fid), "rb") as f:
+                body = f.read()
+        except OSError:
+            return self.send(404, {"error": "file not found"})
+        name = parse_qs(urlsplit(self.path).query).get("name", ["document.pdf"])[0]
+        name = re.sub(r"[\x00-\x1f\\/\"]", "_", name)[:150] or "document.pdf"
+        if not name.lower().endswith(".pdf"):
+            name += ".pdf"
+        self.send(200, body, "application/pdf", {"Content-Disposition": f"inline; filename*=UTF-8''{quote(name)}"})
+
+    def do_DELETE(self):
+        path = self.path.split("?")[0]
+        if not self.gate(path):
+            return
+        fid = self.file_id(path)
+        if not fid:
+            return self.send(404, {"error": "not found"})
+        with LOCK:
+            found = trash_file(fid)
+        self.send(200 if found else 404, {"ok": found})
+
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/healthz":
@@ -227,6 +343,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self.send(500, {"error": "data.json is not valid JSON"})
             return self.send(200, {"exists": raw is not None, "data": data, "etag": etag})
+        if self.file_id(path):
+            return self.download(self.file_id(path))
         if path in STATIC:
             name, ctype = STATIC[path]
             try:
@@ -240,6 +358,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if not self.gate(path):
             return
+        if path == "/api/files":
+            return self.upload()
         try:
             body = self.body_json()
         except ValueError as e:
@@ -307,7 +427,12 @@ def main():
     ap.add_argument("--data-dir", default=os.environ.get("PAYDOWN_DATA_DIR", os.path.join(APP_DIR, "data")))
     ap.add_argument("--stdin", action="store_true", help="passwd: read the password from stdin")
     args = ap.parse_args()
-    DATA_DIR = os.path.abspath(args.data_dir)
+    DATA_DIR = os.path.realpath(args.data_dir)
+    # Keep private data out of the git checkout: only the git-ignored ./data is allowed inside it.
+    app = os.path.realpath(APP_DIR)
+    if os.path.commonpath([DATA_DIR, app]) == app and DATA_DIR != os.path.join(app, "data"):
+        sys.exit(f"Refusing to store data in {DATA_DIR}: it is inside the app folder and could be committed "
+                 f"to git. Use a directory outside {app} (or {os.path.join(app, 'data')}).")
     os.makedirs(DATA_DIR, exist_ok=True)
 
     if args.command == "passwd":
@@ -325,6 +450,7 @@ def main():
 
     if not load_auth():
         print("WARNING: no password set yet — run `python3 server.py passwd` (or `paydown passwd`).", file=sys.stderr)
+    tidy_files()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
     print(f"Paydown listening on http://{args.host}:{args.port}/  (data: {DATA_DIR})", flush=True)

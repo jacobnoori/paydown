@@ -1,3 +1,12 @@
 data/
 __pycache__/
 *.pyc
+
+# Private data must never be committed (belt and braces: the server also refuses
+# to keep its data directory inside this checkout, except the ignored ./data).
+*.pdf
+data.json
+auth.json
+files/
+trash/
+backups/
