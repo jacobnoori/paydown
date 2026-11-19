@@ -12,9 +12,8 @@ The data directory holds:
     data.json      all accounts, transactions and document metadata
     auth.json      password hash + session signing key (mode 600)
     files/         uploaded PDFs (loan agreements, monthly statements)
-    trash/         deleted PDFs, kept 30 days
-    backups/       one snapshot of data.json per day, last 30 kept
 The data directory must be outside the app's git checkout (or the git-ignored ./data).
+Backups are left to the host (e.g. Proxmox Backup Server); `paydown backup` makes a portable copy.
 """
 import argparse
 import getpass
@@ -24,11 +23,9 @@ import json
 import os
 import re
 import secrets
-import shutil
 import sys
 import threading
 import time
-from datetime import date
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
@@ -47,14 +44,13 @@ PUBLIC = {"/login", "/icon.svg", "/manifest.webmanifest", "/healthz", "/api/logi
 COOKIE = "paydown_session"
 SESSION_DAYS = 30
 PBKDF2_ITERS = 600_000
-BACKUPS_KEPT = 30
 FILE_MAX = 25 * 1024 * 1024  # bytes per PDF
 FILE_ID = re.compile(r"^[0-9a-f]{32}$")
-TRASH_DAYS = 30
 
 LOCK = threading.Lock()
 DATA_DIR = ""
 FAILS = {}  # client -> [failure timestamps]
+LAST_TIDY = 0.0
 
 
 def p(name):
@@ -124,24 +120,8 @@ def read_data():
     return raw, hashlib.sha256(raw).hexdigest()[:20]
 
 
-def backup_today():
-    """Snapshot data.json once per day. Returns True when a new snapshot was made."""
-    if not os.path.exists(p("data.json")):
-        return False
-    bdir = p("backups")
-    os.makedirs(bdir, exist_ok=True)
-    target = os.path.join(bdir, f"data-{date.today().isoformat()}.json")
-    if os.path.exists(target):
-        return False
-    shutil.copy2(p("data.json"), target)
-    old = sorted(f for f in os.listdir(bdir) if f.startswith("data-") and f.endswith(".json"))
-    for f in old[:-BACKUPS_KEPT]:
-        os.remove(os.path.join(bdir, f))
-    return True
-
-
 def write_data(raw):
-    if backup_today():  # snapshot of the previous state, once per day
+    if time.time() - LAST_TIDY > 86400:
         tidy_files()
     tmp = p(".data.json.tmp")
     with open(tmp, "wb") as f:
@@ -156,27 +136,19 @@ def file_path(fid):
     return os.path.join(p("files"), fid + ".pdf")
 
 
-def trash_file(fid):
-    src = file_path(fid)
-    if not os.path.exists(src):
+def delete_file(fid):
+    try:
+        os.remove(file_path(fid))
+        return True
+    except FileNotFoundError:
         return False
-    os.makedirs(p("trash"), exist_ok=True)
-    dst = os.path.join(p("trash"), fid + ".pdf")
-    os.replace(src, dst)
-    os.utime(dst)  # mtime = deletion time, for the 30-day purge
-    return True
 
 
 def tidy_files():
-    """Purge old trash, and move PDFs that no document references (e.g. an upload whose
-    account was never saved) to the trash once they are a day old."""
-    now = time.time()
-    tdir = p("trash")
-    if os.path.isdir(tdir):
-        for f in os.listdir(tdir):
-            fp = os.path.join(tdir, f)
-            if now - os.path.getmtime(fp) > TRASH_DAYS * 86400:
-                os.remove(fp)
+    """Delete leftovers: PDFs that no document references once they are a day old (e.g. an
+    upload whose account form was never saved), and interrupted uploads."""
+    global LAST_TIDY
+    LAST_TIDY = time.time()
     fdir = p("files")
     raw, _ = read_data()
     if not os.path.isdir(fdir) or raw is None:
@@ -186,11 +158,12 @@ def tidy_files():
     except (ValueError, AttributeError):
         return
     for f in os.listdir(fdir):
-        fid = f[:-4]
-        if f.endswith(".pdf") and FILE_ID.match(fid) and fid not in refs and now - os.path.getmtime(os.path.join(fdir, f)) > 86400:
-            trash_file(fid)
-        elif f.startswith(".upload-") and now - os.path.getmtime(os.path.join(fdir, f)) > 3600:
-            os.remove(os.path.join(fdir, f))  # interrupted upload
+        fp, fid = os.path.join(fdir, f), f[:-4]
+        age = LAST_TIDY - os.path.getmtime(fp)
+        if f.endswith(".pdf") and FILE_ID.match(fid) and fid not in refs and age > 86400:
+            os.remove(fp)
+        elif f.startswith(".upload-") and age > 3600:
+            os.remove(fp)
 
 
 # ---------- HTTP ----------
@@ -320,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
         if not fid:
             return self.send(404, {"error": "not found"})
         with LOCK:
-            found = trash_file(fid)
+            found = delete_file(fid)
         self.send(200 if found else 404, {"ok": found})
 
     def do_GET(self):

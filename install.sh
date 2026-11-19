@@ -97,4 +97,4 @@ if curl -fsS "http://127.0.0.1:${PAYDOWN_PORT}/healthz" >/dev/null 2>&1; then
 else
   die "service did not start — check: journalctl -u paydown -n 50"
 fi
-echo "Manage it with: paydown {status|logs|restart|update|passwd|backup}"
+echo "Manage it with: paydown {status|logs|restart|update|passwd|backup|restore}"

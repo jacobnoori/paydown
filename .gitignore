@@ -8,5 +8,4 @@ __pycache__/
 data.json
 auth.json
 files/
-trash/
-backups/
+*.tar.gz

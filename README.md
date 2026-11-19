@@ -33,11 +33,12 @@ Re-running the installer is safe: it updates the code and service but never touc
 ## Managing it
 
 ```sh
-paydown status        # service status
-paydown logs          # recent logs
-paydown update        # pull the latest code from git and restart (data untouched)
-paydown passwd        # change the password (signs out all devices)
-paydown backup FILE   # data.json + uploaded PDFs as a .tar.gz
+paydown status          # service status
+paydown logs            # recent logs
+paydown update          # pull the latest code from git and restart (data untouched)
+paydown passwd          # change the password (signs out all devices)
+paydown backup [FILE]   # data.json + uploaded PDFs as a .tar.gz
+paydown restore FILE    # replace all data with a backup archive (keeps the password)
 paydown restart
 ```
 
@@ -50,14 +51,23 @@ You can also change the password in the app (sidebar → Password).
 | `/opt/paydown` | app code (git checkout) |
 | `/var/lib/paydown/data.json` | all accounts and transactions |
 | `/var/lib/paydown/files/` | uploaded PDFs (agreements, statements) |
-| `/var/lib/paydown/trash/` | deleted PDFs, purged after 30 days |
-| `/var/lib/paydown/backups/` | automatic daily snapshot of `data.json`, last 30 days |
 | `/var/lib/paydown/auth.json` | password hash and session key (mode 600) |
 | `/etc/paydown.env` | `PAYDOWN_HOST`, `PAYDOWN_PORT`, `PAYDOWN_DATA_DIR` |
 
-Proxmox backups of the container include all of it. To move to a new container, install there, then extract a
-`paydown backup` archive into `/var/lib/paydown/` (`chown -R paydown:paydown /var/lib/paydown`) and `paydown restart`.
-The in-app Export is JSON only and does not include PDFs.
+## Backups and moving
+
+Paydown keeps no backup copies of its own: back up the container (e.g. nightly to Proxmox Backup Server, which can
+also restore just `/var/lib/paydown/data.json` or a single PDF). Deleted PDFs are removed immediately.
+
+To move to a new container, take a portable copy and restore it after installing there:
+
+```sh
+paydown backup /root/paydown.tar.gz     # on the old container
+paydown restore /root/paydown.tar.gz    # on the new one, after install.sh
+```
+
+`restore` only accepts archives made by `paydown backup`, shows what it contains, and asks before replacing anything.
+The new container keeps the password set during its install.
 
 ## Security notes
 

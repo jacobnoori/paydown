@@ -948,7 +948,7 @@ document.addEventListener('click', async e => {
     case 'add-doc': openDocDialog(getAcc(id), type); break;
     case 'delete-doc': {
       const d = state.documents.find(x => x.id === id);
-      if (await confirmBox('Delete document?', `“${esc(d.name)}” will be removed. It stays in the server's trash for 30 days.`)) {
+      if (await confirmBox('Delete document?', `“${esc(d.name)}” will be permanently deleted.`)) {
         tombstone(id); state.documents = state.documents.filter(x => x.id !== id);
         deleteFile(id); save(); toast('Document deleted'); rerender();
       }
@@ -970,13 +970,6 @@ document.addEventListener('click', async e => {
       try { localStorage.setItem(THEME_KEY, order[(order.indexOf(cur) + 1) % 3]); } catch { /* ignore */ }
       applyTheme(); break;
     }
-    case 'export': {
-      const blob = new Blob([JSON.stringify({ app: 'paydown', version: 1, exportedAt: new Date().toISOString(), ...state }, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob), link = document.createElement('a');
-      link.href = url; link.download = `paydown-${todayISO()}.json`; link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000); break;
-    }
-    case 'import': $('#importFile').click(); break;
     case 'logout': {
       if (store.dirty || store.saving) await flush();
       await fetch('api/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
@@ -985,23 +978,6 @@ document.addEventListener('click', async e => {
     case 'password': openPasswordDialog(); break;
   }
 });
-$('#importFile').addEventListener('change', async e => {
-  const file = e.target.files[0]; e.target.value = '';
-  if (!file) return;
-  try {
-    const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.accounts) || !Array.isArray(data.transactions)) throw new Error('bad');
-    if (state.accounts.length && !(await confirmBox('Replace current data?', `This will replace your ${state.accounts.length} account(s) with ${data.accounts.length} from the file.`, 'Replace'))) return;
-    // Replace: tombstone current records so the replacement also wins on other synced machines.
-    const now = Date.now();
-    [...state.accounts, ...state.transactions, ...state.documents].forEach(x => tombstone(x.id));
-    const imp = normalize(data);
-    [...imp.accounts, ...imp.transactions, ...imp.documents].forEach(x => { x.updatedAt = now + 1; delete state.deleted[x.id]; });
-    state = { version: 2, accounts: imp.accounts, transactions: imp.transactions, documents: imp.documents, deleted: state.deleted };
-    save(); toast('Data imported'); rerender();
-  } catch { toast('That file is not a valid Paydown export'); }
-});
-
 function applyTheme() {
   let t = 'system'; try { t = localStorage.getItem(THEME_KEY) || 'system'; } catch { /* ignore */ }
   if (t === 'system') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = t;

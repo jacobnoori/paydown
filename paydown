@@ -27,9 +27,47 @@ case "${1:-}" in
     [[ $OLD == "$NEW" ]] && echo "Already up to date ($NEW)." || echo "Updated $OLD -> $NEW and restarted."
     ;;
   backup)
+    need_root
     OUT="${2:-$PWD/paydown-$(date +%F).tar.gz}"
     ITEMS=(data.json); [[ -d $DATA_DIR/files ]] && ITEMS+=(files)
     tar -czf "$OUT" -C "$DATA_DIR" "${ITEMS[@]}" && chmod 600 "$OUT" && echo "Saved $OUT (data + uploaded PDFs)"
+    ;;
+  restore)
+    need_root
+    IN="${2:-}"
+    [[ -f $IN ]] || { echo "Usage: paydown restore FILE.tar.gz [-y]" >&2; exit 1; }
+    # Accept only what `paydown backup` produces: data.json and files/<id>.pdf, as plain files.
+    BAD=$(tar -tzf "$IN" | grep -vE '^(data\.json|files/|files/[0-9a-f]{32}\.pdf)$' || true)
+    TYPES=$(tar -tvzf "$IN" | cut -c1 | sort -u | tr -d '\n')
+    if [[ -n $BAD || ! $TYPES =~ ^[-d]+$ ]]; then
+      echo "Not a Paydown backup archive." >&2; [[ -n $BAD ]] && echo "$BAD" | head -5 >&2; exit 1
+    fi
+    TMP=$(mktemp -d -p "$DATA_DIR" .restore-XXXXXX)
+    trap 'rm -rf "$TMP"' EXIT
+    tar -xzf "$IN" -C "$TMP" --no-same-owner --no-same-permissions
+    COUNTS=$(python3 - "$TMP/data.json" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert isinstance(d.get("accounts"), list)
+print(len(d["accounts"]), len(d.get("transactions", [])), len(d.get("documents", [])))
+PY
+) || { echo "data.json in the archive is missing or invalid." >&2; exit 1; }
+    read -r NA NT ND <<<"$COUNTS"
+    NP=$(find "$TMP" -name '*.pdf' | wc -l)
+    echo "Archive contains $NA accounts, $NT transactions, $ND documents ($NP PDF files)."
+    if [[ ${3:-} != "-y" ]]; then
+      read -rp "This REPLACES all current Paydown data (your password is kept). Continue? [y/N] " OK
+      [[ $OK =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 1; }
+    fi
+    systemctl stop paydown
+    rm -rf "$DATA_DIR/files"
+    [[ -d $TMP/files ]] && mv "$TMP/files" "$DATA_DIR/files"
+    mv "$TMP/data.json" "$DATA_DIR/data.json"
+    chown -R "$SVC_USER:$SVC_USER" "$DATA_DIR"
+    chmod 600 "$DATA_DIR/data.json"
+    if [[ -d $DATA_DIR/files ]]; then chmod 700 "$DATA_DIR/files"; find "$DATA_DIR/files" -type f -exec chmod 600 {} +; fi
+    systemctl start paydown
+    echo "Restored from $IN and restarted."
     ;;
   *)
     cat <<EOF
@@ -40,6 +78,7 @@ Usage: paydown <command>
   update            pull the latest code from git and restart (data untouched)
   passwd            change the login password (signs out all sessions)
   backup [FILE]     save data.json and uploaded PDFs to FILE (.tar.gz)
+  restore FILE [-y] replace all data with a backup archive (keeps the password)
 Data: $DATA_DIR   Settings: $ENV_FILE
 EOF
     ;;
