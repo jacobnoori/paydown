@@ -252,15 +252,15 @@ textarea { resize: vertical; min-height: 60px; }
 .inline { display: flex; gap: 8px; align-items: stretch; }
 .inline > :first-child { flex: 1; }
 .type-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.type-tiles label { cursor: pointer; }
-.type-tiles input { position: absolute; opacity: 0; pointer-events: none; }
+.type-tiles label { cursor: pointer; position: relative; }
 .type-tiles .tile { border: 1.5px solid var(--border); border-radius: 11px; padding: 10px 8px; text-align: center; font-size: 12.5px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--muted); }
 .type-tiles .tile i { width: 12px; height: 12px; border-radius: 4px; background: var(--c); }
 .type-tiles input:checked + .tile { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 .type-tiles input:focus-visible + .tile { outline: 2px solid var(--accent); }
 .seg { display: inline-flex; background: var(--surface-2); border-radius: 10px; padding: 3px; gap: 2px; flex-wrap: wrap; }
-.seg label { cursor: pointer; }
-.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label { cursor: pointer; position: relative; }
+/* Visually hidden radios: kept 1px and inside their label so they can't widen the dialog. */
+.type-tiles input, .seg input { position: absolute; top: 0; left: 0; width: 1px; height: 1px; margin: 0; padding: 0; border: 0; opacity: 0; pointer-events: none; }
 .seg span { display: block; padding: 6px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .seg input:checked + span { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
 .preview { background: var(--surface-2); border-radius: 11px; padding: 12px 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
