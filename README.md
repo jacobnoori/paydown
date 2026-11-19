@@ -1,0 +1,84 @@
+# Debt Tracker
+
+A self-hosted web app for tracking credit cards, personal loans, auto loans and mortgages:
+balances, APR and interest rates, purchases, payments split into interest and principal,
+a running balance after every transaction, and a calendar of payment due dates.
+
+Single-user, password-protected, no external dependencies. The backend is one Python file (standard library only)
+and data is a single JSON file on the server.
+
+## Install (Debian / Ubuntu, e.g. a Proxmox LXC)
+
+As root inside the container:
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/jacobnoori/debt-tracker/main/install.sh)"
+```
+
+The installer:
+
+- installs `python3`, `git` and `curl`
+- creates a `debt-tracker` system user
+- clones the app to `/opt/debt-tracker`
+- creates the data directory `/var/lib/debt-tracker`
+- writes settings to `/etc/debt-tracker.env`
+- sets up and starts the `debt-tracker` systemd service on port **8787**
+- asks you to choose a login password
+
+Then open `http://<container-ip>:8787`.
+
+Re-running the installer is safe: it updates the code and service but never touches data or the password.
+
+## Managing it
+
+```sh
+debt-tracker status        # service status
+debt-tracker logs          # recent logs
+debt-tracker update        # pull the latest code from git and restart (data untouched)
+debt-tracker passwd        # change the password (signs out all devices)
+debt-tracker backup FILE   # copy data.json somewhere
+debt-tracker restart
+```
+
+You can also change the password in the app (sidebar → Password).
+
+## Where things live
+
+| Path | What |
+|---|---|
+| `/opt/debt-tracker` | app code (git checkout) |
+| `/var/lib/debt-tracker/data.json` | all accounts and transactions |
+| `/var/lib/debt-tracker/backups/` | automatic daily snapshot, last 30 days |
+| `/var/lib/debt-tracker/auth.json` | password hash and session key (mode 600) |
+| `/etc/debt-tracker.env` | `DT_HOST`, `DT_PORT`, `DT_DATA_DIR` |
+
+Proxmox backups of the container include the data. To move to a new container, install there and copy `data.json` into
+`/var/lib/debt-tracker/` (owned by `debt-tracker`), then `debt-tracker restart`.
+
+## Security notes
+
+- Sign-in uses a password (PBKDF2-SHA256) and an HttpOnly, SameSite=Strict session cookie valid for 30 days.
+  After 5 failed attempts in 10 minutes, sign-in is paused for that client.
+- The app speaks plain HTTP. To use it outside your LAN, put it behind your reverse proxy with HTTPS
+  (cookies are marked `Secure` when the proxy sends `X-Forwarded-Proto: https`), or reach it over a VPN.
+  Don't expose port 8787 directly to the internet.
+- Behind a reverse proxy, the lockout counts attempts by the client IP in `X-Forwarded-For`.
+  When the app is reachable directly, a client can set that header to dodge the lockout,
+  so another reason to keep 8787 LAN-only.
+- Only the app's own UI files are served; the source, data and config are never served over HTTP.
+- Health check: `GET /healthz` (no login required).
+
+## Multiple devices
+
+Open it from any browser. Open pages pick up changes from other devices within a few seconds. If two devices
+save at nearly the same moment, the server rejects the out-of-date save and the app merges the two
+versions entry by entry (newest edit wins, deletions included) before saving again.
+
+## Development
+
+```sh
+python3 server.py passwd --data-dir ./data
+python3 server.py --host 127.0.0.1 --data-dir ./data
+```
+
+`data/` is git-ignored.
