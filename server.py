@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Debt Tracker server — serves the web UI and stores data on this machine.
+"""Paydown server — serves the web UI and stores data on this machine.
 
 Standard library only (Python 3.9+).
 
@@ -7,7 +7,7 @@ Standard library only (Python 3.9+).
     python3 server.py                        # serve on 0.0.0.0:8787
     python3 server.py --host 127.0.0.1 --port 9000 --data-dir ./data
 
-Settings can also come from the environment: DT_HOST, DT_PORT, DT_DATA_DIR.
+Settings can also come from the environment: PAYDOWN_HOST, PAYDOWN_PORT, PAYDOWN_DATA_DIR.
 The data directory holds:
     data.json      all accounts and transactions
     auth.json      password hash + session signing key (mode 600)
@@ -39,7 +39,7 @@ STATIC = {  # URL path -> (file, content type). Only these files are ever served
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
 }
 PUBLIC = {"/login", "/icon.svg", "/manifest.webmanifest", "/healthz", "/api/login"}
-COOKIE = "dt_session"
+COOKIE = "paydown_session"
 SESSION_DAYS = 30
 PBKDF2_ITERS = 600_000
 BACKUPS_KEPT = 30
@@ -141,7 +141,7 @@ def write_data(raw):
 
 # ---------- HTTP ----------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "DebtTracker"
+    server_version = "Paydown"
     sys_version = ""
 
     def log_message(self, fmt, *args):
@@ -248,7 +248,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/login":
             auth, who = load_auth(), self.client()
             if not auth:
-                return self.send(503, {"error": "No password set. Run: debt-tracker passwd"})
+                return self.send(503, {"error": "No password set. Run: paydown passwd"})
             if throttled(who):
                 return self.send(429, {"error": "Too many attempts. Try again in a few minutes."})
             if not check_password(str(body.get("password", "")), auth):
@@ -299,12 +299,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     global DATA_DIR
-    ap = argparse.ArgumentParser(description="Debt Tracker server")
+    ap = argparse.ArgumentParser(description="Paydown server")
     ap.add_argument("command", nargs="?", default="serve", choices=["serve", "passwd"],
                     help="serve (default) or passwd to set the login password")
-    ap.add_argument("--host", default=os.environ.get("DT_HOST", "0.0.0.0"))
-    ap.add_argument("--port", type=int, default=int(os.environ.get("DT_PORT", "8787")))
-    ap.add_argument("--data-dir", default=os.environ.get("DT_DATA_DIR", os.path.join(APP_DIR, "data")))
+    ap.add_argument("--host", default=os.environ.get("PAYDOWN_HOST", "0.0.0.0"))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PAYDOWN_PORT", "8787")))
+    ap.add_argument("--data-dir", default=os.environ.get("PAYDOWN_DATA_DIR", os.path.join(APP_DIR, "data")))
     ap.add_argument("--stdin", action="store_true", help="passwd: read the password from stdin")
     args = ap.parse_args()
     DATA_DIR = os.path.abspath(args.data_dir)
@@ -324,10 +324,10 @@ def main():
         return
 
     if not load_auth():
-        print("WARNING: no password set yet — run `python3 server.py passwd` (or `debt-tracker passwd`).", file=sys.stderr)
+        print("WARNING: no password set yet — run `python3 server.py passwd` (or `paydown passwd`).", file=sys.stderr)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
-    print(f"Debt Tracker listening on http://{args.host}:{args.port}/  (data: {DATA_DIR})", flush=True)
+    print(f"Paydown listening on http://{args.host}:{args.port}/  (data: {DATA_DIR})", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

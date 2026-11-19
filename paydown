@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Admin helper installed to /usr/local/bin/debt-tracker by install.sh
+# Admin helper installed to /usr/local/bin/paydown by install.sh
 set -euo pipefail
-APP_DIR=/opt/debt-tracker
-ENV_FILE=/etc/debt-tracker.env
-SVC_USER=debt-tracker
+APP_DIR=/opt/paydown
+ENV_FILE=/etc/paydown.env
+SVC_USER=paydown
 # shellcheck disable=SC1090
 [[ -f $ENV_FILE ]] && . "$ENV_FILE"
-DATA_DIR="${DT_DATA_DIR:-/var/lib/debt-tracker}"
+DATA_DIR="${PAYDOWN_DATA_DIR:-/var/lib/paydown}"
 
 need_root() { [[ $EUID -eq 0 ]] || { echo "Run as root." >&2; exit 1; }; }
 
 case "${1:-}" in
-  status)  systemctl status debt-tracker --no-pager ;;
-  logs)    journalctl -u debt-tracker -n "${2:-100}" --no-pager ;;
-  restart) need_root; systemctl restart debt-tracker && echo "Restarted." ;;
+  status)  systemctl status paydown --no-pager ;;
+  logs)    journalctl -u paydown -n "${2:-100}" --no-pager ;;
+  restart) need_root; systemctl restart paydown && echo "Restarted." ;;
   passwd)  need_root; runuser -u "$SVC_USER" -- python3 "$APP_DIR/server.py" passwd --data-dir "$DATA_DIR" ;;
   update)
     need_root
@@ -22,17 +22,17 @@ case "${1:-}" in
     OLD=$(git -C "$APP_DIR" rev-parse --short HEAD)
     git -C "$APP_DIR" reset -q --hard "origin/$BR"
     NEW=$(git -C "$APP_DIR" rev-parse --short HEAD)
-    install -m 755 "$APP_DIR/debt-tracker" /usr/local/bin/debt-tracker
-    systemctl restart debt-tracker
+    install -m 755 "$APP_DIR/paydown" /usr/local/bin/paydown
+    systemctl restart paydown
     [[ $OLD == "$NEW" ]] && echo "Already up to date ($NEW)." || echo "Updated $OLD -> $NEW and restarted."
     ;;
   backup)
-    OUT="${2:-$PWD/debt-tracker-$(date +%F).json}"
+    OUT="${2:-$PWD/paydown-$(date +%F).json}"
     cp "$DATA_DIR/data.json" "$OUT" && echo "Saved $OUT"
     ;;
   *)
     cat <<EOF
-Usage: debt-tracker <command>
+Usage: paydown <command>
   status            service status
   logs [N]          last N log lines (default 100)
   restart           restart the service

@@ -1,4 +1,4 @@
-# Debt Tracker
+# Paydown
 
 A self-hosted web app for tracking credit cards, personal loans, auto loans and mortgages:
 balances, APR and interest rates, purchases, payments split into interest and principal,
@@ -12,17 +12,17 @@ and data is a single JSON file on the server.
 As root inside the container:
 
 ```sh
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/jacobnoori/debt-tracker/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/jacobnoori/paydown/main/install.sh)"
 ```
 
 The installer:
 
 - installs `python3`, `git` and `curl`
-- creates a `debt-tracker` system user
-- clones the app to `/opt/debt-tracker`
-- creates the data directory `/var/lib/debt-tracker`
-- writes settings to `/etc/debt-tracker.env`
-- sets up and starts the `debt-tracker` systemd service on port **8787**
+- creates a `paydown` system user
+- clones the app to `/opt/paydown`
+- creates the data directory `/var/lib/paydown`
+- writes settings to `/etc/paydown.env`
+- sets up and starts the `paydown` systemd service on port **8787**
 - asks you to choose a login password
 
 Then open `http://<container-ip>:8787`.
@@ -32,12 +32,12 @@ Re-running the installer is safe: it updates the code and service but never touc
 ## Managing it
 
 ```sh
-debt-tracker status        # service status
-debt-tracker logs          # recent logs
-debt-tracker update        # pull the latest code from git and restart (data untouched)
-debt-tracker passwd        # change the password (signs out all devices)
-debt-tracker backup FILE   # copy data.json somewhere
-debt-tracker restart
+paydown status        # service status
+paydown logs          # recent logs
+paydown update        # pull the latest code from git and restart (data untouched)
+paydown passwd        # change the password (signs out all devices)
+paydown backup FILE   # copy data.json somewhere
+paydown restart
 ```
 
 You can also change the password in the app (sidebar → Password).
@@ -46,14 +46,14 @@ You can also change the password in the app (sidebar → Password).
 
 | Path | What |
 |---|---|
-| `/opt/debt-tracker` | app code (git checkout) |
-| `/var/lib/debt-tracker/data.json` | all accounts and transactions |
-| `/var/lib/debt-tracker/backups/` | automatic daily snapshot, last 30 days |
-| `/var/lib/debt-tracker/auth.json` | password hash and session key (mode 600) |
-| `/etc/debt-tracker.env` | `DT_HOST`, `DT_PORT`, `DT_DATA_DIR` |
+| `/opt/paydown` | app code (git checkout) |
+| `/var/lib/paydown/data.json` | all accounts and transactions |
+| `/var/lib/paydown/backups/` | automatic daily snapshot, last 30 days |
+| `/var/lib/paydown/auth.json` | password hash and session key (mode 600) |
+| `/etc/paydown.env` | `PAYDOWN_HOST`, `PAYDOWN_PORT`, `PAYDOWN_DATA_DIR` |
 
 Proxmox backups of the container include the data. To move to a new container, install there and copy `data.json` into
-`/var/lib/debt-tracker/` (owned by `debt-tracker`), then `debt-tracker restart`.
+`/var/lib/paydown/` (owned by `paydown`), then `paydown restart`.
 
 ## Security notes
 

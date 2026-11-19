@@ -1,5 +1,5 @@
 'use strict';
-/* Debt Tracker — all money is stored as integer cents to avoid floating-point drift.
+/* Paydown — all money is stored as integer cents to avoid floating-point drift.
    Dates are stored as local "YYYY-MM-DD" strings. */
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -55,7 +55,7 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString
    Data lives on the server (data.json). Every record carries updatedAt and deletions leave a
    tombstone in `deleted`, so if two devices save around the same time the server rejects the
    stale write (409) and the client merges record-by-record before retrying. */
-const THEME_KEY = 'debt-tracker:theme';
+const THEME_KEY = 'paydown:theme';
 const ui = { calY: null, calM: null, calSel: null, txFilter: 'all' };
 const store = { etag: null, dirty: false, saving: false, error: '', timer: null };
 
@@ -760,7 +760,7 @@ function openTxDialog(acc, tx, presetType) {
 function openPasswordDialog() {
   openModal(`<form class="modal-body" id="pwForm" novalidate>
     <header><h2>Change password</h2><p>Other signed-in devices will be signed out.</p></header>
-    <input type="text" name="username" autocomplete="username" value="debt-tracker" hidden>
+    <input type="text" name="username" autocomplete="username" value="paydown" hidden>
     <label class="f">Current password<input type="password" name="current" autocomplete="current-password" required></label>
     <label class="f">New password <span class="hint">At least 8 characters</span><input type="password" name="new" autocomplete="new-password" minlength="8" required></label>
     <label class="f">Repeat new password<input type="password" name="repeat" autocomplete="new-password" required></label>
@@ -863,9 +863,9 @@ document.addEventListener('click', async e => {
       applyTheme(); break;
     }
     case 'export': {
-      const blob = new Blob([JSON.stringify({ app: 'debt-tracker', version: 1, exportedAt: new Date().toISOString(), ...state }, null, 2)], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify({ app: 'paydown', version: 1, exportedAt: new Date().toISOString(), ...state }, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob), link = document.createElement('a');
-      link.href = url; link.download = `debt-tracker-${todayISO()}.json`; link.click();
+      link.href = url; link.download = `paydown-${todayISO()}.json`; link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000); break;
     }
     case 'import': $('#importFile').click(); break;
@@ -892,7 +892,7 @@ $('#importFile').addEventListener('change', async e => {
     imp.transactions.forEach(t => { t.updatedAt = now + 1; delete state.deleted[t.id]; });
     state = { version: 2, accounts: imp.accounts, transactions: imp.transactions, deleted: state.deleted };
     save(); toast('Data imported'); rerender();
-  } catch { toast('That file is not a valid Debt Tracker export'); }
+  } catch { toast('That file is not a valid Paydown export'); }
 });
 
 function applyTheme() {

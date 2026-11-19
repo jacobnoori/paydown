@@ -1,6 +1,6 @@
 {
-  "name": "Debt Tracker",
-  "short_name": "Debts",
+  "name": "Paydown",
+  "short_name": "Paydown",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
