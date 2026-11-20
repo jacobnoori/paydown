@@ -15,18 +15,20 @@ and data is a single JSON file on the server.
 ## Screenshots
 
 Shown with the built-in sample data (*Load sample data* on a fresh install). All names and numbers are made up.
+Click an image to see it full size.
 
-**Dashboard**: debt totals, cash and savings, upcoming due dates and recent activity.
+[![Paydown dashboard: debt totals, cash and savings, debts and upcoming due dates](docs/screenshots/dashboard.png)](docs/screenshots/dashboard.png)
 
-![Paydown dashboard](docs/screenshots/dashboard.png)
-
-**Accounts**: credit cards, loans, mortgage, checking and savings at a glance.
-
-![Paydown accounts page](docs/screenshots/accounts.png)
-
-**Calendar**: payment due dates for every account, marked paid, upcoming or overdue.
-
-![Paydown calendar](docs/screenshots/calendar.png)
+<table>
+  <tr>
+    <th width="50%">Account page: payments split into interest, escrow and principal, plus agreement and statement PDFs</th>
+    <th width="50%">Calendar: every account's due dates, marked paid, upcoming or overdue</th>
+  </tr>
+  <tr>
+    <td><a href="docs/screenshots/account.png"><img src="docs/screenshots/account.png" alt="Paydown mortgage account page"></a></td>
+    <td><a href="docs/screenshots/calendar.png"><img src="docs/screenshots/calendar.png" alt="Paydown payment calendar"></a></td>
+  </tr>
+</table>
 
 ## Install (Debian / Ubuntu, e.g. a Proxmox LXC)
 
