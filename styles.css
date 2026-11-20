@@ -195,6 +195,12 @@ td .acct { display: flex; align-items: center; gap: 10px; font-weight: 600; }
 input[type=file] { padding: 7px; font-size: 13px; }
 @media (max-width: 860px) { .docs { grid-template-columns: 1fr; } }
 
+.pick-list { margin: 0 -24px; }
+.pick-list li { padding: 0; }
+.pick { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 24px; cursor: pointer; }
+.pick:hover, .pick:focus-visible { background: var(--surface-2); }
+.pick .grow b { display: block; }
+
 /* Calendar */
 .cal-wrap { grid-template-columns: minmax(0, 1fr) 320px; align-items: start; }
 .cal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; gap: 10px; }

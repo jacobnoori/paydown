@@ -14,14 +14,15 @@ const TYPES = {
   checking:      { label: 'Checking',      plural: 'Checking Accounts', color: '#64748b', kind: 'cash' },
   savings:       { label: 'Savings',       plural: 'Savings Accounts',  color: '#d946ef', kind: 'cash' },
 };
-const TX_LABEL = { purchase: 'Purchase', payment: 'Payment', interest: 'Interest charge', fee: 'Fee', refund: 'Refund / credit', adjustment: 'Adjustment', deposit: 'Deposit', withdrawal: 'Withdrawal', transfer_out: 'Transfer out', transfer_in: 'Transfer in' };
-// A transfer between two cash accounts is stored as a linked pair: transfer_out on the source account and
-// transfer_in on the destination, sharing a transferId; each side records the other account in counterAccountId.
+const TX_LABEL = { purchase: 'Purchase', payment: 'Payment', interest: 'Interest charge', fee: 'Fee', refund: 'Refund / credit', adjustment: 'Adjustment', deposit: 'Deposit', withdrawal: 'Withdrawal', transfer_out: 'Transfer out', transfer_in: 'Transfer in', debt_payment: 'Debt payment' };
+// Linked pairs share a transferId and each side records the other account in counterAccountId:
+//  - a transfer between cash accounts: transfer_out on the source, transfer_in on the destination;
+//  - a debt paid from a cash account: debt_payment on the cash account, a normal payment on the debt account.
 const isTransfer = t => t.type === 'transfer_out' || t.type === 'transfer_in';
 const transferPair = t => state.transactions.find(x => x.transferId && x.transferId === t.transferId && x.id !== t.id);
 const counterName = t => getAcc(t.counterAccountId)?.name || 'a deleted account';
-// Description shown in lists: transfers name the other account.
-const txDesc = (t, accType) => isTransfer(t) ? `${t.type === 'transfer_out' ? 'To' : 'From'} ${counterName(t)}${t.memo ? ' · ' + t.memo : ''}` : (t.memo || txLabel(t.type, accType));
+// Description shown in lists: linked entries name the other account.
+const txDesc = (t, accType) => t.counterAccountId ? `${t.type === 'transfer_out' || t.type === 'debt_payment' ? 'To' : 'From'} ${counterName(t)}${t.memo ? ' · ' + t.memo : ''}` : (t.memo || txLabel(t.type, accType));
 const isCard = t => t === 'credit_card';
 const isCash = t => TYPES[t].kind === 'cash';
 const isLoan = t => !isCard(t) && !isCash(t);
@@ -191,7 +192,7 @@ function effect(t, accType) {
     case 'fee': return isCash(accType) ? -t.amount : t.amount;
     case 'refund': case 'withdrawal': return -t.amount;
     case 'deposit': case 'transfer_in': return t.amount;
-    case 'transfer_out': return -t.amount;
+    case 'transfer_out': case 'debt_payment': return -t.amount;
     case 'adjustment': return t.amount;               // signed
     case 'payment': return -(t.amount - (t.interest || 0) - (t.escrow || 0));
   }
@@ -234,7 +235,7 @@ function suggestLoanInterest(acc, date, excludeId) {
   if (acc.type === 'mortgage') {
     // Mortgages accrue monthly: balance × rate / 12, charged once per month.
     const ym = date.slice(0, 7);
-    if (others.some(t => t.type === 'payment' && t.date.slice(0, 7) === ym && t.date <= date && (t.interest || 0) > 0)) return { cents: 0, why: 'Interest already applied this month — extra payment goes to principal.' };
+    if (others.some(t => t.type === 'payment' && t.date.slice(0, 7) === ym && t.date <= date && (t.interest || 0) > 0)) return { cents: 0, why: 'Interest already applied this month — extra payment goes to principal' };
     const bal = Math.max(balanceOn(acc, date, excludeId), 0);
     return { cents: Math.round(bal * r / 12), why: `${money(bal)} × ${pct(rateFor(acc), 3)} ÷ 12` };
   }
@@ -492,7 +493,7 @@ function cashStats(a, bal, totals) {
   const f = flows30(a);
   return `${a.type === 'savings' ? `<div class="card stat"><div class="label">APY</div><div class="value">${pct(a.apy)}</div><div class="sub">≈ ${money(apyMonthly(bal, a.apy))}/mo · ${money(Math.round(Math.max(bal, 0) * (a.apy || 0) / 100))}/yr interest</div></div>` : ''}
     <div class="card stat"><div class="label">Money in · 30 days</div><div class="value">${money(f.in)}</div><div class="sub">Deposits${a.type === 'savings' ? ' and interest' : ''}</div></div>
-    <div class="card stat"><div class="label">Money out · 30 days</div><div class="value">${money(f.out)}</div><div class="sub">${a.type === 'checking' ? 'Purchases, withdrawals and fees' : 'Withdrawals and fees'}</div></div>
+    <div class="card stat"><div class="label">Money out · 30 days</div><div class="value">${money(f.out)}</div><div class="sub">${a.type === 'checking' ? 'Purchases, withdrawals, fees and card/loan payments' : 'Withdrawals, fees and card/loan payments'}</div></div>
     ${a.type === 'savings' ? `<div class="card stat"><div class="label">Interest earned</div><div class="value">${money(totals.int)}</div><div class="sub">Logged since ${fmtDate(a.startDate)}</div></div>` : ''}`;
 }
 function renderAccount(a) {
@@ -506,10 +507,11 @@ function renderAccount(a) {
     if (t.type === 'withdrawal') s.wd += t.amount;
     if (t.type === 'fee') s.fee += t.amount;
     if (isTransfer(t)) s.xfer += t.type === 'transfer_in' ? t.amount : -t.amount;
+    if (t.type === 'debt_payment') s.dpay += t.amount;
     return s;
-  }, { paid: 0, int: 0, purch: 0, dep: 0, wd: 0, fee: 0, xfer: 0 });
+  }, { paid: 0, int: 0, purch: 0, dep: 0, wd: 0, fee: 0, xfer: 0, dpay: 0 });
   const util = isCard(a.type) && a.creditLimit ? bal / a.creditLimit * 100 : null;
-  const filters = ['all', ...txTypesFor(a.type), ...(cash ? ['transfer_out', 'transfer_in'] : [])].filter(f => f === 'all' || L.some(t => t.type === f));
+  const filters = ['all', ...txTypesFor(a.type), ...(cash ? ['transfer_out', 'transfer_in', 'debt_payment'] : [])].filter(f => f === 'all' || L.some(t => t.type === f));
   if (!filters.includes(ui.txFilter)) ui.txFilter = 'all';
   const shown = [...L].reverse().filter(t => ui.txFilter === 'all' || t.type === ui.txFilter);
 
@@ -521,6 +523,7 @@ function renderAccount(a) {
       ${cash ? `<button class="btn" data-action="add-tx" data-id="${a.id}" data-type="withdrawal">+ ${a.type === 'checking' ? 'Purchase / withdrawal' : 'Withdrawal'}</button>
       <button class="btn primary" data-action="add-tx" data-id="${a.id}" data-type="deposit">+ Deposit</button>
       <button class="btn" data-action="transfer" data-id="${a.id}">⇄ Transfer</button>
+      <button class="btn" data-action="pay-debt" data-id="${a.id}">Pay card / loan</button>
       <button class="btn" data-action="add-tx" data-id="${a.id}" data-type="${a.type === 'savings' ? 'interest' : 'fee'}">More…</button>`
       : `${isCard(a.type) ? `<button class="btn" data-action="add-tx" data-id="${a.id}" data-type="purchase">+ Purchase</button>` : ''}
       <button class="btn primary" data-action="add-tx" data-id="${a.id}" data-type="payment">+ Payment</button>
@@ -544,6 +547,7 @@ function renderAccount(a) {
         <div><span>Withdrawals</span><b>${money(totals.wd)}</b></div>
         <div><span>Interest earned</span><b>${money(totals.int)}</b></div>
         <div><span>Fees</span><b>${money(totals.fee)}</b></div>
+        <div><span>Card &amp; loan payments</span><b>${money(totals.dpay)}</b></div>
         <div><span>Transfers (net)</span><b>${totals.xfer < 0 ? '−' : totals.xfer > 0 ? '+' : ''}${money(Math.abs(totals.xfer))}</b></div>` : `
         <div><span>Payments</span><b>${money(totals.paid)}</b></div>
         <div><span>Interest</span><b>${money(totals.int)}</b></div>
@@ -565,7 +569,7 @@ function renderAccount(a) {
         ${shown.map(t => `<tr>
           <td class="num" style="text-align:left">${fmtDate(t.date)}</td>
           <td><span class="chip">${txLabel(t.type, a.type)}</span></td>
-          <td>${isTransfer(t) ? esc(txDesc(t, a.type)) : esc(t.memo) || '<span class="muted">—</span>'}</td>
+          <td>${t.counterAccountId ? esc(txDesc(t, a.type)) : esc(t.memo) || '<span class="muted">—</span>'}</td>
           <td class="num">${money(t.amount)}</td>
           ${loan ? `<td class="num">${t.type === 'payment' ? money(t.interest || 0) : '—'}</td>${a.type === 'mortgage' ? `<td class="num">${t.type === 'payment' ? money(t.escrow || 0) : '—'}</td>` : ''}` : ''}
           <td class="num ${changeCls(t.effect, a.type)}">${t.effect > 0 ? '+' : t.effect < 0 ? '−' : ''}${money(Math.abs(t.effect))}</td>
@@ -844,7 +848,7 @@ function openAccountDialog(acc) {
       if (early) return err(`A transaction is dated ${fmtDate(early.date)}, before the new balance date. Move the date earlier.`);
       if (a.type !== type && hasTx && isCash(a.type) !== isCash(type)) return err(`A ${isCash(a.type) ? 'cash' : 'debt'} account with transactions can't become a ${isCash(type) ? 'cash' : 'debt'} account: deposits and payments would change meaning.`);
       if (a.type !== type) {
-        const bad = state.transactions.find(t => t.accountId === a.id && !txTypesFor(type).includes(t.type) && !(isTransfer(t) && isCash(type)));
+        const bad = state.transactions.find(t => t.accountId === a.id && !txTypesFor(type).includes(t.type) && !(isCash(type) && (isTransfer(t) || t.type === 'debt_payment')));
         if (bad) return err(`This account has ${txLabel(bad.type, a.type).toLowerCase()} entries that a ${TYPES[type].label.toLowerCase()} account can't hold.`);
       }
     }
@@ -865,11 +869,17 @@ function openAccountDialog(acc) {
 }
 
 /* ---------- transaction form ---------- */
-function openTxDialog(acc, tx, presetType) {
+// opts.payFrom: preselect a cash account to pay a debt from (used by "Pay card / loan" on cash accounts).
+function openTxDialog(acc, tx, presetType, opts = {}) {
   const editing = !!tx;
   const types = txTypesFor(acc.type);
   const loan = isLoan(acc.type);
   const t = tx || { type: types.includes(presetType) ? presetType : types.includes('payment') ? 'payment' : types[0], date: todayISO(), amount: null, interest: null, escrow: acc.type === 'mortgage' ? acc.escrow : null, memo: '' };
+  // Debt payments can be linked to the cash account they were paid from.
+  const linked = tx && tx.transferId ? transferPair(tx) : null;
+  const cashAccs = isCash(acc.type) ? [] : state.accounts.filter(a => isCash(a.type));
+  const lastFrom = () => { const p = txsFor(acc.id).filter(x => x.type === 'payment' && x.counterAccountId && getAcc(x.counterAccountId)).pop(); return p ? p.counterAccountId : ''; };
+  const payFrom0 = editing ? (linked ? linked.accountId : '') : (opts.payFrom || lastFrom());
   openModal(`<form class="modal-body" id="txForm" novalidate>
     <header><h2>${editing ? 'Edit transaction' : 'Log transaction'}</h2><p>${esc(acc.name)} · ${TYPES[acc.type].label}</p></header>
     <div class="seg">${types.map(k => `<label><input type="radio" name="type" value="${k}" ${t.type === k ? 'checked' : ''}><span>${txLabel(k, acc.type)}</span></label>`).join('')}</div>
@@ -877,6 +887,8 @@ function openTxDialog(acc, tx, presetType) {
       <label class="f">Date<input type="date" name="date" required min="${acc.startDate}" value="${t.date}"></label>
       <label class="f"><span id="amtLabel">Amount</span><div class="inline">${moneyField('amount', centsIn(t.amount == null ? null : Math.abs(t.amount)), 'required')}<button type="button" class="btn sm" id="fillPay" title="Use the account's payment amount">${acc.payment ? 'Use ' + money(acc.payment) : ''}</button></div></label>
       <label class="f" data-when="adjustment">Direction<select name="dir"><option value="1">Increase balance</option><option value="-1" ${t.type === 'adjustment' && t.amount < 0 ? 'selected' : ''}>Decrease balance</option></select></label>
+      ${cashAccs.length ? `<label class="f full" data-when="payment">Paid from <span class="hint">Also records the payment in that account</span><select name="payFrom">
+        <option value="">Not tracked in Paydown</option>${cashAccs.map(c => `<option value="${c.id}" ${c.id === payFrom0 ? 'selected' : ''}>${esc(c.name)} · ${money(currentBalance(c))}</option>`).join('')}</select></label>` : ''}
       ${loan ? `<label class="f" data-when="payment">Interest portion
         <div class="inline">${moneyField('interest', centsIn(t.interest))}<button type="button" class="btn sm" id="calcInt">Auto</button></div></label>
         ${acc.type === 'mortgage' ? `<label class="f" data-when="payment">Escrow portion${moneyField('escrow', centsIn(t.escrow))}</label>` : ''}` : ''}
@@ -891,6 +903,7 @@ function openTxDialog(acc, tx, presetType) {
   let intTouched = editing && tx.type === 'payment';
   const exId = tx?.id;
   const fill = $('#fillPay'); if (!acc.payment) fill.remove();
+  const payFromAcc = () => (f.payFrom && f.type.value === 'payment' && f.payFrom.value) ? getAcc(f.payFrom.value) : null;
 
   const read = () => {
     const type = f.type.value, amount = toCents(f.amount.value);
@@ -920,9 +933,11 @@ function openTxDialog(acc, tx, presetType) {
     if (!o.date || isNaN(o.amount)) { prev.innerHTML = `<div><span>Balance before</span><b>${o.date ? money(balanceOn(acc, o.date, exId)) : '—'}</b></div>`; return; }
     const before = balanceOn(acc, o.date, exId), eff = effect(o, acc.type), after = before + eff;
     const later = txsFor(acc.id, exId).some(x => x.date > o.date);
+    const from = payFromAcc(), fromBefore = from && balanceOn(from, o.date, linked?.id);
     prev.innerHTML = `<div><span>Balance before</span><b>${money(before)}</b></div>
       ${type === 'payment' && loan ? `<div><span>Principal</span><b class="${-eff < 0 ? 'pos' : ''}">${money(-eff)}</b></div>` : ''}
       <div><span>Balance after</span><b>${money(after)}</b></div>
+      ${from ? `<div><span>${esc(from.name)}</span><b>${money(fromBefore)} → ${money(fromBefore - o.amount)}</b></div>` : ''}
       ${later ? '<div><span>&nbsp;</span><b class="muted small" style="font-weight:500">Later entries will be recalculated</b></div>' : ''}`;
   };
   f.addEventListener('input', e => { if (e.target.name === 'interest') intTouched = true; if (e.target.name === 'date' && !editing) intTouched = false; update(); });
@@ -935,17 +950,48 @@ function openTxDialog(acc, tx, presetType) {
   f.onsubmit = e => {
     e.preventDefault();
     const o = read(), err = m => { $('#txErr').textContent = m; };
+    const from = payFromAcc();
     if (!o.date) return err('Choose a date.');
     if (o.date < acc.startDate) return err(`Date can't be before the account's balance date (${fmtDate(acc.startDate)}).`);
+    if (from && o.date < from.startDate) return err(`Date can't be before ${from.name}'s balance date (${fmtDate(from.startDate)}).`);
     if (isNaN(o.amount) || o.amount === 0 || (o.type !== 'adjustment' && o.amount < 0)) return err('Enter an amount greater than zero.');
     if (isNaN(o.interest) || o.interest < 0 || isNaN(o.escrow) || o.escrow < 0) return err('Interest and escrow must be zero or more.');
     if (o.interest + o.escrow > o.amount) return err('Interest + escrow can\'t exceed the total payment.');
     const rec = { ...o, memo: f.memo.value.trim() };
     if (!(o.type === 'payment' && loan)) { delete rec.interest; delete rec.escrow; }
+    let main = tx;
     if (editing) { delete tx.interest; delete tx.escrow; touch(Object.assign(tx, rec)); }
-    else state.transactions.push({ id: uid(), accountId: acc.id, createdAt: Date.now(), updatedAt: Date.now(), ...rec });
-    save(); closeModal(); toast(editing ? 'Transaction updated' : `${txLabel(o.type, acc.type)} logged`); rerender();
+    else { main = { id: uid(), accountId: acc.id, createdAt: Date.now(), updatedAt: Date.now(), ...rec }; state.transactions.push(main); }
+    // Keep the linked cash-side entry in step: create, update, or remove it.
+    if (from) {
+      const side = { accountId: from.id, type: 'debt_payment', date: o.date, amount: o.amount, memo: rec.memo, counterAccountId: acc.id };
+      if (linked) touch(Object.assign(linked, side));
+      else {
+        main.transferId = main.transferId || uid();
+        state.transactions.push({ id: uid(), createdAt: Date.now(), updatedAt: Date.now(), transferId: main.transferId, ...side });
+      }
+      touch(Object.assign(main, { counterAccountId: from.id }));
+    } else if (linked) {
+      tombstone(linked.id); state.transactions = state.transactions.filter(x => x.id !== linked.id);
+      delete main.transferId; delete main.counterAccountId; touch(main);
+    }
+    save(); closeModal();
+    toast(editing ? 'Transaction updated' : from ? `Paid ${money(o.amount)} from ${from.name}` : `${txLabel(o.type, acc.type)} logged`); rerender();
   };
+}
+
+// From a checking/savings account: pick which card or loan to pay, then open its payment form.
+function openPayDebtPicker(cashAcc) {
+  const debts = state.accounts.filter(a => !isCash(a.type));
+  if (!debts.length) { toast('Add a credit card or loan first.'); return; }
+  openModal(`<div class="modal-body">
+    <header><h2>Pay a card or loan</h2><p>From ${esc(cashAcc.name)} · ${money(currentBalance(cashAcc))}</p></header>
+    <ul class="list pick-list">${debts.map(d => { const nd = nextDue(d); return `<li><button type="button" class="pick" data-action="pay-debt-pick" data-id="${d.id}" data-from="${cashAcc.id}">
+      <span class="dot" style="background:${accColor(d)}"></span>
+      <span class="grow"><b>${esc(d.name)}</b><span class="muted small">${TYPES[d.type].label} · ${money(currentBalance(d))}${nd ? ` · due ${fmtDate(nd.date, { month: 'short', day: 'numeric' })}` : ''}</span></span>
+      <span class="right">${d.payment ? money(d.payment) : ''}</span></button></li>`; }).join('')}</ul>
+    <footer><button type="button" class="btn" data-action="close">Cancel</button></footer>
+  </div>`);
 }
 
 /* ---------- transfers between cash accounts ---------- */
@@ -1082,6 +1128,13 @@ function loadSample() {
     if (last > start && last <= T) tx(sav, { type: 'interest', date: last, amount: estimateSavingsInterest(sav, last).cents, memo: 'Monthly interest' });
   }
 
+  // Card and loan payments come out of checking, as linked pairs.
+  const debtIds = [card, pl, auto, mort].map(a => a.id);
+  state.transactions.filter(t => t.type === 'payment' && debtIds.includes(t.accountId)).forEach(p => {
+    p.transferId = uid(); p.counterAccountId = chk.id;
+    tx(chk, { type: 'debt_payment', date: p.date, amount: p.amount, memo: p.memo, transferId: p.transferId, counterAccountId: p.accountId });
+  });
+
   save(); toast('Sample data loaded'); rerender();
 }
 
@@ -1097,8 +1150,8 @@ document.addEventListener('click', async e => {
     case 'delete-account': {
       const a = getAcc(id); const n = state.transactions.filter(t => t.accountId === id).length;
       const docs = docsFor(id);
-      const xfers = state.transactions.some(t => t.accountId === id && isTransfer(t) && transferPair(t));
-      if (await confirmBox('Delete account?', `“${esc(a.name)}”, its ${n} transaction${n === 1 ? '' : 's'}${docs.length ? ` and ${docs.length} document${docs.length === 1 ? '' : 's'}` : ''} will be permanently removed.${xfers ? ' Transfers with other accounts stay in those accounts, so their balances don\'t change.' : ''}`)) {
+      const xfers = state.transactions.some(t => t.accountId === id && t.transferId && transferPair(t));
+      if (await confirmBox('Delete account?', `“${esc(a.name)}”, its ${n} transaction${n === 1 ? '' : 's'}${docs.length ? ` and ${docs.length} document${docs.length === 1 ? '' : 's'}` : ''} will be permanently removed.${xfers ? ' Linked transfers and payments recorded in other accounts stay there, so their balances don\'t change.' : ''}`)) {
         tombstone(id);
         state.transactions.filter(t => t.accountId === id).forEach(t => tombstone(t.id));
         docs.forEach(d => { tombstone(d.id); deleteFile(d.id); });
@@ -1111,20 +1164,25 @@ document.addEventListener('click', async e => {
     }
     case 'add-tx': openTxDialog(getAcc(id), null, type); break;
     case 'transfer': openTransferDialog(getAcc(id)); break;
+    case 'pay-debt': openPayDebtPicker(getAcc(id)); break;
+    case 'pay-debt-pick': openTxDialog(getAcc(id), null, 'payment', { payFrom: el.dataset.from }); break;
     case 'edit-tx': {
-      const t = state.transactions.find(x => x.id === id);
-      if (isTransfer(t)) { if (transferPair(t)) openTransferDialog(getAcc(t.accountId), t); else toast('The other account was deleted — this transfer can only be deleted.'); }
+      const t = state.transactions.find(x => x.id === id), pair = t.transferId && transferPair(t);
+      if ((isTransfer(t) || t.type === 'debt_payment') && !pair) toast('The other account was deleted — this entry can only be deleted.');
+      else if (isTransfer(t)) openTransferDialog(getAcc(t.accountId), t);
+      else if (t.type === 'debt_payment') openTxDialog(getAcc(pair.accountId), pair);   // edit from the debt side (keeps the interest split)
       else openTxDialog(getAcc(t.accountId), t);
       break;
     }
     case 'delete-tx': {
-      const t = state.transactions.find(x => x.id === id), pair = isTransfer(t) && transferPair(t);
-      const msg = pair ? `Transfer of ${money(t.amount)} ${t.type === 'transfer_out' ? 'to' : 'from'} ${esc(counterName(t))} on ${fmtDate(t.date)}. Both sides are removed and both balances recalculated.`
+      const t = state.transactions.find(x => x.id === id), pair = t.transferId && transferPair(t);
+      const out = t.type === 'transfer_out' || t.type === 'debt_payment';
+      const msg = pair ? `${isTransfer(t) ? 'Transfer' : 'Payment'} of ${money(t.amount)} ${out ? 'to' : 'from'} ${esc(counterName(t))} on ${fmtDate(t.date)}. It's removed from both accounts and both balances are recalculated.`
         : `${txLabel(t.type, getAcc(t.accountId).type)} of ${money(Math.abs(t.amount))} on ${fmtDate(t.date)}. Balances after it will be recalculated.`;
-      if (await confirmBox(pair ? 'Delete transfer?' : 'Delete transaction?', msg)) {
+      if (await confirmBox(pair ? (isTransfer(t) ? 'Delete transfer?' : 'Delete payment?') : 'Delete transaction?', msg)) {
         const ids = pair ? [t.id, pair.id] : [t.id];
         ids.forEach(tombstone); state.transactions = state.transactions.filter(x => !ids.includes(x.id));
-        save(); toast(pair ? 'Transfer deleted' : 'Transaction deleted'); rerender();
+        save(); toast(pair ? (isTransfer(t) ? 'Transfer deleted' : 'Payment deleted') : 'Transaction deleted'); rerender();
       }
       break;
     }
