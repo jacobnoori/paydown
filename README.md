@@ -12,6 +12,22 @@ estimate monthly interest. Cash accounts are kept out of debt totals, APR averag
 Single-user, password-protected, no external dependencies. The backend is one Python file (standard library only)
 and data is a single JSON file on the server.
 
+## Screenshots
+
+Shown with the built-in sample data (*Load sample data* on a fresh install). All names and numbers are made up.
+
+**Dashboard**: debt totals, cash and savings, upcoming due dates and recent activity.
+
+![Paydown dashboard](docs/screenshots/dashboard.png)
+
+**Accounts**: credit cards, loans, mortgage, checking and savings at a glance.
+
+![Paydown accounts page](docs/screenshots/accounts.png)
+
+**Calendar**: payment due dates for every account, marked paid, upcoming or overdue.
+
+![Paydown calendar](docs/screenshots/calendar.png)
+
 ## Install (Debian / Ubuntu, e.g. a Proxmox LXC)
 
 As root inside the container:
